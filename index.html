@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="出店レジ">
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<title>キッチンカーPOS PWA</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f4f4f4;color:#171717;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Yu Gothic",sans-serif}
+header{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid #ddd;padding:10px 12px;display:flex;align-items:center;justify-content:space-between}
+h1{font-size:18px;margin:0}.ver{font-size:11px;color:#777}
+main{max-width:980px;margin:auto;padding:10px}.card{background:#fff;border-radius:14px;padding:13px;margin-bottom:10px}
+button,input{font:inherit}button{cursor:pointer}.btn{border:1px solid #ccc;background:#fff;border-radius:9px;padding:9px 11px}.primary{border:0;background:#111;color:#fff;border-radius:9px;padding:11px 14px;font-weight:800}
+label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11px;border:1px solid #ccc;border-radius:9px;background:#fff}
+.status{display:flex;gap:10px;align-items:center;justify-content:space-between}.offline{color:#b71c1c;font-weight:800}.online{color:#176d29;font-weight:800}
+.hidden{display:none!important}.actions{display:flex;gap:7px;flex-wrap:wrap}.event{display:flex;gap:8px;align-items:center;padding:9px 0;border-bottom:1px solid #eee}.event button:first-child{flex:1;text-align:left}
+.products{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.product{background:var(--c,#fff);border-radius:13px;padding:13px;box-shadow:0 1px 3px #0001}
+.product b{font-size:17px}.price{display:block;font-size:20px;font-weight:900;margin:6px 0}.productBtns{display:grid;grid-template-columns:1fr 1fr;gap:6px}.productBtns button{padding:8px 4px;border-radius:8px;font-weight:800}.cashAdd{border:1px solid #111;background:#111;color:#fff}.ticketAdd{border:1px solid #111;background:#fff}.ticketAdd:disabled{opacity:.35}
+.row{display:grid;grid-template-columns:1fr auto;gap:8px;padding:9px 0;border-bottom:1px solid #eee}.qtyline{display:flex;gap:5px;align-items:center;justify-content:flex-end;margin:3px 0}.qtyline button{width:31px;height:31px;border:1px solid #ccc;background:#fff;border-radius:7px}.tag{display:inline-block;padding:3px 6px;border-radius:999px;font-size:11px;font-weight:800}.tag.ticket{background:#111;color:#fff}.tag.cash{background:#eee}
+.bigPay{display:flex;align-items:center;justify-content:space-between;background:#f7f7f7;border-radius:11px;padding:12px;margin:10px 0}.bigPay b{font-size:30px}
+.grid2{display:grid;grid-template-columns:1fr 170px;gap:8px;align-items:end}.split{display:flex;justify-content:flex-end;gap:20px;margin-top:8px}.split b{font-size:20px}.split .cashRemain b{font-size:28px}
+.change{display:flex;align-items:center;justify-content:space-between;background:#f7f7f7;border-radius:10px;padding:10px 12px;margin-top:8px}.change b{font-size:30px}
+.prints{display:flex;gap:7px;flex-wrap:wrap;margin:12px 0}.prints button.on{background:#111;color:#fff;border-color:#111}
+.history table{width:100%;border-collapse:collapse}.history th,.history td{padding:7px;border-bottom:1px solid #eee;font-size:12px;text-align:left}.money{text-align:right!important}
+.notice{font-size:12px;color:#777}.danger{border:1px solid #b71c1c;color:#b71c1c;background:#fff;border-radius:8px;padding:7px 9px}
+@media(min-width:720px){.products{grid-template-columns:repeat(4,1fr)}}@media(max-width:600px){.grid2{grid-template-columns:1fr}.row{grid-template-columns:1fr}.history{overflow-x:auto}}
+
+.managerList{width:100%;border-collapse:collapse}.managerList td{padding:8px;border-bottom:1px solid #eee;font-size:13px}
+.colorPresets{display:flex;gap:7px;flex-wrap:wrap;margin-top:7px}.colorPresets button{width:34px;height:34px;border:1px solid #aaa;border-radius:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>キッチンカーPOS</h1>
+  <span class="ver">PWA-2</span>
+</header>
+<main>
+  <div class="card status">
+    <div><span id="netStatus">確認中</span>　未同期 <b id="pending">0</b>件</div>
+    <div class="actions">
+      <button class="btn" onclick="openManager()">商品・チケット管理</button>
+      <button class="btn" onclick="refreshMaster()">商品更新</button>
+      <button class="btn" onclick="syncPending()">同期</button>
+    </div>
+  </div>
+
+  <div id="setupCard" class="card hidden">
+    <b>初回設定</b>
+    <div class="notice">GASのウェブアプリURLを1回だけ登録してください。</div>
+    <label>GASウェブアプリURL</label>
+    <input id="gasUrl" placeholder="https://script.google.com/macros/s/...../exec">
+    <button class="primary" style="margin-top:9px" onclick="saveGasUrl()">保存して接続</button>
+  </div>
+
+
+  <div id="manager" class="hidden">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <div>
+          <b>商品・チケット管理</b>
+          <div class="notice">オフラインでも追加・編集できます。未同期変更はネット復旧時に同期します。</div>
+        </div>
+        <button class="btn" onclick="closeManager()">閉じる</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">商品</h3>
+      <input id="mProductId" type="hidden">
+      <label>商品名</label><input id="mProductName">
+      <label>価格</label><input id="mProductPrice" type="number" min="0">
+      <label>税率</label>
+      <select id="mProductTax" style="width:100%;padding:11px;border:1px solid #ccc;border-radius:9px;background:#fff">
+        <option value="8">8%</option><option value="10">10%</option>
+      </select>
+      <label>表示順</label><input id="mProductSort" type="number" min="0">
+      <label>対応チケット</label>
+      <select id="mProductTicket" style="width:100%;padding:11px;border:1px solid #ccc;border-radius:9px;background:#fff"></select>
+      <label>表示色</label><input id="mProductColor" type="color" value="#ffffff">
+      <div class="colorPresets">
+        <button type="button" style="background:#fff2cc" onclick="setManagerColor('#fff2cc')"></button>
+        <button type="button" style="background:#d9ead3" onclick="setManagerColor('#d9ead3')"></button>
+        <button type="button" style="background:#cfe2f3" onclick="setManagerColor('#cfe2f3')"></button>
+        <button type="button" style="background:#f4cccc" onclick="setManagerColor('#f4cccc')"></button>
+        <button type="button" style="background:#ead1dc" onclick="setManagerColor('#ead1dc')"></button>
+        <button type="button" style="background:#ffffff" onclick="setManagerColor('#ffffff')"></button>
+      </div>
+      <div class="actions" style="margin-top:10px">
+        <button class="primary" onclick="saveManagerProduct()">商品保存</button>
+        <button class="btn" onclick="clearManagerProduct()">新規登録</button>
+      </div>
+      <div id="managerProducts" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">チケット</h3>
+      <input id="mTicketId" type="hidden">
+      <label>チケット名</label><input id="mTicketName">
+      <label>チケット額</label><input id="mTicketValue" type="number" min="0">
+      <div class="actions" style="margin-top:10px">
+        <button class="primary" onclick="saveManagerTicket()">チケット保存</button>
+        <button class="btn" onclick="clearManagerTicket()">新規登録</button>
+      </div>
+      <div id="managerTickets" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <div id="eventSelect" class="card">
+    <label>日付</label>
+    <div class="grid2">
+      <input id="saleDate" type="date">
+      <button class="primary" onclick="showEvents()">出店一覧</button>
+    </div>
+    <div id="eventList" style="margin-top:10px"></div>
+    <button class="btn" style="margin-top:9px" onclick="newEvent()">＋ 新規出店</button>
+  </div>
+
+  <div id="register" class="hidden">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <div><div class="notice">現在のレジ</div><b id="activeEvent"></b></div>
+        <button class="btn" onclick="backEvents()">出店選択</button>
+      </div>
+    </div>
+
+    <div id="productGrid" class="products"></div>
+
+    <div id="cartCard" class="card hidden">
+      <div id="cartRows"></div>
+
+      <div class="grid2" style="border-top:1px solid #eee;padding-top:12px;margin-top:8px">
+        <div><label>割引額</label><div class="notice">クーポン・割引券がある場合だけ入力</div></div>
+        <input id="discount" type="number" min="0" value="0" inputmode="numeric">
+      </div>
+
+      <div class="bigPay"><span>お客様お支払額</span><b id="customerPay">0円</b></div>
+
+      <div style="border-top:1px solid #eee;padding-top:12px">
+        <label>PayPay支払い</label>
+        <div class="grid2">
+          <button class="btn" onclick="paypayFull()">PayPay 全額</button>
+          <input id="paypay" type="number" min="0" value="0" inputmode="numeric" placeholder="一部なら金額入力">
+        </div>
+        <div class="split">
+          <span>PayPay <b id="paypayView">0円</b></span>
+          <span class="cashRemain">現金 <b id="cashView">0円</b></span>
+        </div>
+      </div>
+
+      <div style="border-top:1px solid #eee;padding-top:12px;margin-top:12px">
+        <label>現金預り</label>
+        <div class="grid2">
+          <button class="btn" onclick="exactCash()">ちょうど</button>
+          <input id="received" type="number" min="0" value="0" inputmode="numeric" placeholder="預り金">
+        </div>
+        <div class="change"><span>おつり</span><b id="change">0円</b></div>
+      </div>
+
+      <div class="prints">
+        <button id="pn" class="btn on" onclick="setPrint('none')">印刷なし</button>
+        <button id="pr" class="btn" onclick="setPrint('receipt')">レシート</button>
+        <button id="pi" class="btn" onclick="setPrint('invoice')">領収書</button>
+      </div>
+      <div id="invoiceFields" class="hidden">
+        <label>宛名</label><input id="invoiceTo">
+        <label>但し書き</label><input id="invoiceNote" value="お品代として">
+      </div>
+
+      <button class="primary" style="width:100%;font-size:18px;padding:16px" onclick="checkout()">会計確定</button>
+    </div>
+
+    <div class="card history">
+      <b>このイベントの会計履歴</b>
+      <div id="history" class="notice" style="margin-top:8px">まだ会計履歴がありません。</div>
+    </div>
+  </div>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const yen=n=>Number(n||0).toLocaleString('ja-JP')+'円';
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+let data={products:[],tickets:[],settings:{},events:[]},cart={},currentEvent=null,printMode='none';
+
+function today(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
+function gasUrl(){return localStorage.getItem('pwa_gas_url')||''}
+function cacheMaster(){localStorage.setItem('pwa_master',JSON.stringify(data))}
+function loadMaster(){try{return JSON.parse(localStorage.getItem('pwa_master')||'null')}catch{return null}}
+function pending(){try{return JSON.parse(localStorage.getItem('pwa_pending')||'[]')}catch{return []}}
+function savePending(q){localStorage.setItem('pwa_pending',JSON.stringify(q));updatePendingTotal()}
+
+function pendingMaster(){
+  try{return JSON.parse(localStorage.getItem('pwa_pending_master')||'[]')}catch{return []}
+}
+function savePendingMaster(q){
+  localStorage.setItem('pwa_pending_master',JSON.stringify(q));
+  updatePendingTotal();
+}
+function queueMaster(action,payload){
+  const q=pendingMaster();
+  const key=action+':'+String(payload.id||'');
+  // 同じ商品/チケットの未同期変更は最新内容に置き換える
+  const filtered=q.filter(x=>x.key!==key);
+  filtered.push({key,action,payload});
+  savePendingMaster(filtered);
+}
+function updatePendingTotal(){
+  const count=pending().length+pendingMaster().length;
+  $('pending').textContent=count;
+}
+
+function historyKey(e){return 'pwa_history_'+e.saleDate+'_'+e.outletName}
+function localHistory(e){try{return JSON.parse(localStorage.getItem(historyKey(e))||'[]')}catch{return []}}
+function saveHistory(e,h){localStorage.setItem(historyKey(e),JSON.stringify(h))}
+
+function updateNet(){
+  const on=navigator.onLine;
+  $('netStatus').textContent=on?'オンライン':'オフライン';
+  $('netStatus').className=on?'online':'offline';
+}
+window.addEventListener('online',()=>{updateNet();syncPending();});
+window.addEventListener('offline',updateNet);
+
+function jsonp(api,params={}){
+  return new Promise((resolve,reject)=>{
+    const url=gasUrl(); if(!url)return reject(new Error('GAS URL未設定'));
+    const cb='__jp'+Date.now()+Math.random().toString(36).slice(2);
+    const script=document.createElement('script');
+    const q=new URLSearchParams({api,callback:cb,...params});
+    const timer=setTimeout(()=>{cleanup();reject(new Error('通信タイムアウト'));},12000);
+    function cleanup(){clearTimeout(timer);delete window[cb];script.remove()}
+    window[cb]=v=>{cleanup();resolve(v)};
+    script.onerror=()=>{cleanup();reject(new Error('通信エラー'))};
+    script.src=url+(url.includes('?')?'&':'?')+q.toString();
+    document.head.appendChild(script);
+  });
+}
+
+async function postApi(action,payload){
+  const url=gasUrl(); if(!url)throw new Error('GAS URL未設定');
+  await fetch(url,{method:'POST',mode:'no-cors',headers:{'Content-Type':'text/plain;charset=UTF-8'},body:JSON.stringify({action,payload})});
+}
+
+async function init(){
+  $('saleDate').value=today();
+  ['discount','paypay','received'].forEach(id=>$(id).addEventListener('input',renderCart));
+  updateNet(); savePending(pending()); savePendingMaster(pendingMaster());
+
+  const cached=loadMaster();
+  if(cached)data=cached;
+
+  if(!gasUrl()){
+    $('setupCard').classList.remove('hidden');
+  }else if(navigator.onLine){
+    await refreshMaster(false);
+  }
+  showEvents();
+
+  if('serviceWorker' in navigator){
+    try{await navigator.serviceWorker.register('./sw.js')}catch(e){console.warn(e)}
+  }
+}
+
+async function saveGasUrl(){
+  const v=$('gasUrl').value.trim();
+  if(!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/.test(v))return alert('GASのウェブアプリURLを確認してください。');
+  localStorage.setItem('pwa_gas_url',v);
+  $('setupCard').classList.add('hidden');
+  await refreshMaster();
+}
+
+
+function openManager(){
+  $('eventSelect').classList.add('hidden');
+  $('register').classList.add('hidden');
+  $('manager').classList.remove('hidden');
+  renderManager();
+}
+function closeManager(){
+  $('manager').classList.add('hidden');
+  $('eventSelect').classList.remove('hidden');
+  renderProducts();
+}
+function setManagerColor(c){$('mProductColor').value=c}
+function renderManager(){
+  $('mProductTicket').innerHTML='<option value="">チケット対象外</option>'+(data.tickets||[]).map(t=>`<option value="${esc(t.id)}">${esc(t.name)}（${yen(t.value)}）</option>`).join('');
+
+  $('managerProducts').innerHTML=(data.products||[]).length
+    ? `<table class="managerList">${data.products.map(p=>`<tr><td><span style="display:inline-block;width:18px;height:18px;border-radius:4px;vertical-align:middle;background:${esc(p.color||'#fff')};border:1px solid #bbb"></span> ${esc(p.name)}</td><td>${yen(p.price)}</td><td><button class="btn" onclick='editManagerProduct(${JSON.stringify(p.id)})'>編集</button> <button class="danger" onclick='deleteManagerProduct(${JSON.stringify(p.id)})'>削除</button></td></tr>`).join('')}</table>`
+    : '<div class="notice">商品なし</div>';
+
+  $('managerTickets').innerHTML=(data.tickets||[]).length
+    ? `<table class="managerList">${data.tickets.map(t=>`<tr><td>${esc(t.name)}</td><td>${yen(t.value)}</td><td><button class="btn" onclick='editManagerTicket(${JSON.stringify(t.id)})'>編集</button> <button class="danger" onclick='deleteManagerTicket(${JSON.stringify(t.id)})'>削除</button></td></tr>`).join('')}</table>`
+    : '<div class="notice">チケットなし</div>';
+}
+function clearManagerProduct(){
+  $('mProductId').value='';$('mProductName').value='';$('mProductPrice').value='';$('mProductTax').value='8';$('mProductSort').value='1';$('mProductTicket').value='';$('mProductColor').value='#ffffff';
+}
+function editManagerProduct(id){
+  const p=data.products.find(x=>String(x.id)===String(id));if(!p)return;
+  $('mProductId').value=p.id;$('mProductName').value=p.name;$('mProductPrice').value=p.price;$('mProductTax').value=String(p.taxRate||8);$('mProductSort').value=p.sort||0;$('mProductTicket').value=p.ticketId||'';$('mProductColor').value=p.color||'#ffffff';
+}
+function saveManagerProduct(){
+  const name=$('mProductName').value.trim();if(!name)return alert('商品名を入力してください。');
+  const id=$('mProductId').value||('lp_'+Date.now()+'_'+Math.random().toString(36).slice(2,7));
+  const p={id,name,price:Number($('mProductPrice').value||0),taxRate:Number($('mProductTax').value||8),sort:Number($('mProductSort').value||0),ticketId:$('mProductTicket').value,color:$('mProductColor').value||'#ffffff',active:true};
+
+  const i=data.products.findIndex(x=>String(x.id)===String(id));
+  if(i>=0)data.products[i]=p;else data.products.push(p);
+  data.products.sort((a,b)=>Number(a.sort||0)-Number(b.sort||0));
+  cacheMaster();queueMaster('saveProductOffline',p);clearManagerProduct();renderManager();
+  if(navigator.onLine)syncPending();
+}
+function deleteManagerProduct(id){
+  const p=data.products.find(x=>String(x.id)===String(id));if(!p)return;
+  if(!confirm(`商品「${p.name}」を削除しますか？`))return;
+  data.products=data.products.filter(x=>String(x.id)!==String(id));
+  cacheMaster();queueMaster('deleteProductOffline',{id});renderManager();
+  if(navigator.onLine)syncPending();
+}
+function clearManagerTicket(){$('mTicketId').value='';$('mTicketName').value='';$('mTicketValue').value=''}
+function editManagerTicket(id){
+  const t=data.tickets.find(x=>String(x.id)===String(id));if(!t)return;
+  $('mTicketId').value=t.id;$('mTicketName').value=t.name;$('mTicketValue').value=t.value;
+}
+function saveManagerTicket(){
+  const name=$('mTicketName').value.trim();if(!name)return alert('チケット名を入力してください。');
+  const id=$('mTicketId').value||('lt_'+Date.now()+'_'+Math.random().toString(36).slice(2,7));
+  const t={id,name,value:Number($('mTicketValue').value||0),active:true};
+  const i=data.tickets.findIndex(x=>String(x.id)===String(id));
+  if(i>=0)data.tickets[i]=t;else data.tickets.push(t);
+  cacheMaster();queueMaster('saveTicketOffline',t);clearManagerTicket();renderManager();
+  if(navigator.onLine)syncPending();
+}
+function deleteManagerTicket(id){
+  const t=data.tickets.find(x=>String(x.id)===String(id));if(!t)return;
+  if(!confirm(`チケット「${t.name}」を削除しますか？`))return;
+  data.tickets=data.tickets.filter(x=>String(x.id)!==String(id));
+  data.products=(data.products||[]).map(p=>String(p.ticketId)===String(id)?{...p,ticketId:''}:p);
+  cacheMaster();queueMaster('deleteTicketOffline',{id});renderManager();
+  if(navigator.onLine)syncPending();
+}
+
+async function refreshMaster(showAlert=true){
+  if(!navigator.onLine){if(showAlert)alert('オフラインです。保存済みの商品でレジは使えます。');return}
+  try{
+    const b=await jsonp('bootstrap');
+    data.products=b.products||[];data.tickets=b.tickets||[];data.settings=b.settings||{};data.events=b.events||[];
+    cacheMaster();showEvents();
+    if(showAlert)alert('商品・チケット設定を更新しました。');
+  }catch(e){if(showAlert)alert(e.message)}
+}
+
+function eventsForDate(date){
+  const map={};
+  (data.events||[]).forEach(e=>{if(e.saleDate===date)map[e.outletName]=e});
+  // Local-only events
+  try{
+    const local=JSON.parse(localStorage.getItem('pwa_local_events')||'[]');
+    local.forEach(e=>{if(e.saleDate===date)map[e.outletName]=e});
+  }catch{}
+  return Object.values(map).sort((a,b)=>a.outletName.localeCompare(b.outletName,'ja'));
+}
+function saveLocalEvent(e){
+  let a=[];try{a=JSON.parse(localStorage.getItem('pwa_local_events')||'[]')}catch{}
+  if(!a.some(x=>x.saleDate===e.saleDate&&x.outletName===e.outletName))a.push(e);
+  localStorage.setItem('pwa_local_events',JSON.stringify(a));
+}
+
+function showEvents(){
+  const date=$('saleDate').value;if(!date)return;
+  const es=eventsForDate(date);
+  $('eventList').innerHTML=es.length?es.map(e=>`<div class="event"><button class="btn" onclick='openEvent(${JSON.stringify(e.outletName)})'>${esc(e.outletName)}</button></div>`).join(''):'<div class="notice">この日の出店はありません。</div>';
+}
+function newEvent(){
+  const date=$('saleDate').value; if(!date)return alert('日付を選択してください。');
+  const name=prompt('新しい出店名'); if(!name||!name.trim())return;
+  const e={saleDate:date,outletName:name.trim(),eventId:'local-'+Date.now()};
+  saveLocalEvent(e);showEvents();openEvent(e.outletName);
+  if(navigator.onLine)postApi('createEvent',e).catch(()=>{});
+}
+function openEvent(name){
+  currentEvent={saleDate:$('saleDate').value,outletName:name};
+  saveLocalEvent(currentEvent);
+  $('eventSelect').classList.add('hidden');$('register').classList.remove('hidden');
+  $('activeEvent').textContent=currentEvent.saleDate+'　'+currentEvent.outletName;
+  renderProducts();renderCart();renderHistory();
+  if(navigator.onLine)refreshHistoryOnline();
+}
+function backEvents(){currentEvent=null;cart={};$('register').classList.add('hidden');$('eventSelect').classList.remove('hidden');showEvents()}
+
+function renderProducts(){
+  $('productGrid').innerHTML=(data.products||[]).map(p=>{
+    const t=(data.tickets||[]).find(x=>String(x.id)===String(p.ticketId));
+    return `<div class="product" style="--c:${esc(p.color||'#fff')}"><b>${esc(p.name)}</b><span class="price">${yen(p.price)}</span><div class="productBtns"><button class="cashAdd" onclick='addItem(${JSON.stringify(p.id)},"cash",1)'>チケット無</button><button class="ticketAdd" ${t?'':'disabled'} onclick='addItem(${JSON.stringify(p.id)},"ticket",1)'>チケット有</button></div></div>`;
+  }).join('');
+}
+function product(id){return data.products.find(p=>String(p.id)===String(id))}
+function ticketFor(p){return data.tickets.find(t=>String(t.id)===String(p.ticketId))}
+function addItem(id,mode,d){
+  if(!cart[id])cart[id]={cashQty:0,ticketQty:0};
+  cart[id][mode==='ticket'?'ticketQty':'cashQty']=Math.max(0,cart[id][mode==='ticket'?'ticketQty':'cashQty']+d);
+  if(!cart[id].cashQty&&!cart[id].ticketQty)delete cart[id];renderCart();
+}
+function orderItems(){return Object.entries(cart).map(([id,v])=>({id,cashQty:v.cashQty||0,ticketQty:v.ticketQty||0})).filter(x=>x.cashQty||x.ticketQty)}
+function cashGross(){return orderItems().reduce((s,x)=>s+Number(product(x.id)?.price||0)*x.cashQty,0)}
+function discount(){return Math.max(0,Number($('discount').value||0))}
+function customerPay(){return Math.max(0,cashGross()-Math.min(discount(),cashGross()))}
+function paypay(){return Math.min(Math.max(0,Number($('paypay').value||0)),customerPay())}
+function cashNeed(){return Math.max(0,customerPay()-paypay())}
+function received(){return Math.max(0,Number($('received').value||0))}
+function change(){return cashNeed()<=0?0:Math.max(0,received()-cashNeed())}
+function paypayFull(){$('paypay').value=customerPay();renderCart()}
+function exactCash(){$('received').value=cashNeed();renderCart()}
+
+function renderCart(){
+  const its=orderItems();$('cartCard').classList.toggle('hidden',!its.length);
+  $('cartRows').innerHTML=its.map(x=>{const p=product(x.id);return `<div class="row"><div><b>${esc(p.name)}</b><div class="notice">${yen(p.price)}</div></div><div><div class="qtyline"><span class="tag cash">チケット無</span><button onclick='addItem(${JSON.stringify(p.id)},"cash",-1)'>−</button><b>${x.cashQty}</b><button onclick='addItem(${JSON.stringify(p.id)},"cash",1)'>＋</button></div><div class="qtyline"><span class="tag ticket">チケット有</span><button onclick='addItem(${JSON.stringify(p.id)},"ticket",-1)'>−</button><b>${x.ticketQty}</b><button onclick='addItem(${JSON.stringify(p.id)},"ticket",1)'>＋</button></div></div></div>`}).join('');
+  $('customerPay').textContent=yen(customerPay());$('paypayView').textContent=yen(paypay());$('cashView').textContent=yen(cashNeed());$('change').textContent=yen(change());
+}
+function setPrint(m){printMode=m;['pn','pr','pi'].forEach(x=>$(x).classList.remove('on'));$(m==='receipt'?'pr':m==='invoice'?'pi':'pn').classList.add('on');$('invoiceFields').classList.toggle('hidden',m!=='invoice')}
+
+async function checkout(){
+  if(!currentEvent)return;
+  const its=orderItems();if(!its.length)return;
+  if(discount()>cashGross())return alert('割引額が大きすぎます。');
+  if(cashNeed()>0&&received()<cashNeed())return alert('現金預りが不足しています。必要な現金：'+yen(cashNeed()));
+  if(!confirm('お客様支払 '+yen(customerPay())+'\nおつり '+yen(change())+'\n\n会計しますか？'))return;
+
+  const id='cs_'+Date.now()+'_'+Math.random().toString(36).slice(2,8);
+  const sale={
+    clientSaleId:id,saleId:id,timestamp:new Date().toISOString(),...currentEvent,
+    items:its.map(x=>{const p=product(x.id),t=ticketFor(p);return {id:x.id,name:p.name,price:Number(p.price),cashQty:x.cashQty,ticketQty:x.ticketQty,qty:x.cashQty+x.ticketQty,taxRate:Number(p.taxRate||8),ticketName:t?.name||'',ticketValue:Number(t?.value||0)}}),
+    discountAmount:discount(),paypayAmount:paypay(),cashAmount:cashNeed(),customerPaid:customerPay(),cashReceived:received(),changeAmount:change(),settings:data.settings||{}
+  };
+  sale.total=sale.items.reduce((s,i)=>s+i.price*i.qty,0);
+
+  const h=localHistory(currentEvent);h.unshift(sale);saveHistory(currentEvent,h);renderHistory();
+
+  if(printMode==='receipt')printText(receiptText(sale,false,'',''));
+  if(printMode==='invoice')printText(receiptText(sale,true,$('invoiceTo').value,$('invoiceNote').value));
+
+  const payload={items:its,outletName:currentEvent.outletName,saleDate:currentEvent.saleDate,discountAmount:discount(),paypayAmount:paypay(),clientSaleId:id};
+  const q=pending();q.push(payload);savePending(q);
+
+  cart={};$('discount').value=0;$('paypay').value=0;$('received').value=0;$('invoiceTo').value='';$('invoiceNote').value='お品代として';setPrint('none');renderCart();
+  if(navigator.onLine)syncPending();
+}
+
+async function syncPending(){
+  updateNet();
+  if(!navigator.onLine)return;
+
+  // 商品・チケット変更を先に同期
+  let mq=pendingMaster(), mremain=[];
+  for(const m of mq){
+    try{
+      await postApi(m.action,m.payload);
+    }catch{
+      mremain.push(m);
+    }
+  }
+  savePendingMaster(mremain);
+
+  // 売上を同期
+  let q=pending(),remain=[];
+  for(const p of q){
+    try{
+      await postApi('recordSale',p);
+      await new Promise(r=>setTimeout(r,500));
+      const chk=await jsonp('hasSale',{clientSaleId:p.clientSaleId});
+      if(!chk.found)remain.push(p);
+    }catch{remain.push(p)}
+  }
+  savePending(remain);
+
+  // 同期後にサーバーの最新マスタを端末へ再取得
+  if(!mremain.length){
+    try{
+      const b=await jsonp('bootstrap');
+      data.products=b.products||data.products;
+      data.tickets=b.tickets||data.tickets;
+      data.settings=b.settings||data.settings;
+      data.events=b.events||data.events;
+      cacheMaster();
+      if(!$('manager').classList.contains('hidden'))renderManager();
+      if(!$('register').classList.contains('hidden'))renderProducts();
+    }catch{}
+  }
+
+  if(currentEvent)refreshHistoryOnline();
+}
+
+function renderHistory(){
+  const h=localHistory(currentEvent);
+  $('history').innerHTML=h.length?`<table><tr><th>時刻</th><th>内容</th><th class="money">現金</th><th class="money">PayPay</th><th class="money">支払</th></tr>${h.slice(0,30).map(s=>`<tr><td>${new Date(s.timestamp).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})}</td><td>${esc((s.items||[]).map(i=>i.name+'×'+i.qty).join('、'))}</td><td class="money">${yen(s.cashAmount)}</td><td class="money">${yen(s.paypayAmount)}</td><td class="money"><b>${yen(s.customerPaid)}</b></td></tr>`).join('')}</table>`:'まだ会計履歴がありません。';
+}
+async function refreshHistoryOnline(){
+  try{
+    const server=await jsonp('history',{outletName:currentEvent.outletName,saleDate:currentEvent.saleDate});
+    const local=localHistory(currentEvent),map={};
+    [...local,...server].forEach(s=>{const k=s.clientSaleId||s.saleId;map[k]=s});
+    const merged=Object.values(map).sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp));
+    saveHistory(currentEvent,merged);renderHistory();
+  }catch{}
+}
+
+function receiptText(s,isInvoice,to,note){
+  const st=s.settings||{},L=[];
+  if(st.sellerName)L.push(st.sellerName);if(st.companyName)L.push(st.companyName);if(st.invoiceNo)L.push('登録番号 '+st.invoiceNo);if(st.address)L.push(st.address);
+  L.push('',isInvoice?'　　　　領 収 書':'　　　　レ シ ー ト',s.outletName+' / '+s.saleDate,new Date(s.timestamp).toLocaleString('ja-JP'));
+  if(isInvoice&&to)L.push('宛名：'+to);L.push('------------------------------');
+  (s.items||[]).forEach(i=>{if(i.cashQty)L.push(`${i.name} x${i.cashQty} ${yen(i.price*i.cashQty)}`);if(i.ticketQty){L.push(`${i.name} x${i.ticketQty} ${yen(i.price*i.ticketQty)}`);L.push('  チケット利用（お客様負担 0円）')}});
+  L.push('------------------------------','商品合計 '+yen(s.total));if(s.discountAmount)L.push('割引 -'+yen(s.discountAmount));if(s.paypayAmount)L.push('PayPay '+yen(s.paypayAmount));if(s.cashAmount)L.push('現金 '+yen(s.cashAmount));L.push('お客様支払 '+yen(s.customerPaid));
+  if(isInvoice){L.push('領収金額 '+yen(s.customerPaid));if(note)L.push(note)}
+  L.push('------------------------------');
+  const rates={};(s.items||[]).forEach(i=>{const r=Number(i.taxRate||8);rates[r]=(rates[r]||0)+i.price*i.qty});
+  Object.entries(rates).forEach(([r,a])=>{const tax=Math.floor(a*Number(r)/(100+Number(r)));L.push(`${r}%対象 ${yen(a)}`);L.push(`消費税額等 ${yen(tax)}`)});
+  if(rates[8])L.push('※ 軽減税率対象');if(st.receiptFooter)L.push('',st.receiptFooter);return L.join('\n');
+}
+function printText(text){
+  const old=$('printFrame');if(old)old.remove();const f=document.createElement('iframe');f.id='printFrame';f.style='position:fixed;width:1px;height:1px;opacity:0;border:0;right:0;bottom:0';document.body.appendChild(f);
+  const d=f.contentWindow.document;d.open();d.write(`<html><head><meta charset="UTF-8"><style>body{font-family:monospace;white-space:pre-wrap;width:58mm;margin:3mm;font-size:12px}@media print{@page{size:58mm auto;margin:3mm}}
+.managerList{width:100%;border-collapse:collapse}.managerList td{padding:8px;border-bottom:1px solid #eee;font-size:13px}
+.colorPresets{display:flex;gap:7px;flex-wrap:wrap;margin-top:7px}.colorPresets button{width:34px;height:34px;border:1px solid #aaa;border-radius:8px}
+</style></head><body>${esc(text)}</body></html>`);d.close();
+  setTimeout(()=>{f.contentWindow.focus();f.contentWindow.print();setTimeout(()=>f.remove(),1200)},80);
+}
+init();
+</script>
+</body>
+</html>
