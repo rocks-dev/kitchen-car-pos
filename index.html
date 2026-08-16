@@ -33,17 +33,24 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 
 .managerList{width:100%;border-collapse:collapse}.managerList td{padding:8px;border-bottom:1px solid #eee;font-size:13px}
 .colorPresets{display:flex;gap:7px;flex-wrap:wrap;margin-top:7px}.colorPresets button{width:34px;height:34px;border:1px solid #aaa;border-radius:8px}
+
+.summaryKpi{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.summaryKpi div{background:#f7f7f7;border-radius:10px;padding:10px}
+.summaryKpi span{display:block;font-size:12px;color:#666}.summaryKpi b{display:block;font-size:21px;margin-top:3px}
+.summaryTable{width:100%;border-collapse:collapse}.summaryTable th,.summaryTable td{padding:8px;border-bottom:1px solid #eee;font-size:13px;text-align:left}
+@media(max-width:600px){.summaryKpi{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-2</span>
+  <span class="ver">PWA-3</span>
 </header>
 <main>
   <div class="card status">
     <div><span id="netStatus">確認中</span>　未同期 <b id="pending">0</b>件</div>
     <div class="actions">
+      <button class="btn" onclick="openSummary()">集計</button>
       <button class="btn" onclick="openManager()">商品・チケット管理</button>
       <button class="btn" onclick="refreshMaster()">商品更新</button>
       <button class="btn" onclick="syncPending()">同期</button>
@@ -58,6 +65,27 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
     <button class="primary" style="margin-top:9px" onclick="saveGasUrl()">保存して接続</button>
   </div>
 
+
+
+  <div id="summaryPanel" class="hidden">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+        <div><b>出店別集計</b><div class="notice">オンライン時は全端末分、オフライン時はこの端末保存分を表示します。</div></div>
+        <button class="btn" onclick="closeSummary()">閉じる</button>
+      </div>
+    </div>
+    <div class="card"><div id="summaryGroups"></div></div>
+    <div id="summaryDetail" class="hidden">
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+          <b id="summaryTitle"></b><button class="btn" onclick="printSummary()">集計表を印刷</button>
+        </div>
+        <div id="summaryKpi" class="summaryKpi"></div>
+      </div>
+      <div class="card"><h3>商品別</h3><div id="summaryProducts"></div></div>
+      <div class="card"><h3>チケット別</h3><div id="summaryTickets"></div></div>
+    </div>
+  </div>
 
   <div id="manager" class="hidden">
     <div class="card">
@@ -182,11 +210,24 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
   </div>
 </main>
 
+<div id="reprintModal" class="hidden" style="position:fixed;inset:0;background:#0008;z-index:50;align-items:center;justify-content:center">
+  <div class="card" style="width:min(620px,94vw);max-height:88vh;overflow:auto">
+    <div style="display:flex;justify-content:space-between"><b id="reprintTitle"></b><button class="btn" onclick="closeReprint()">閉じる</button></div>
+    <div id="reprintInvoiceFields" class="hidden">
+      <label>宛名</label><input id="reprintTo">
+      <label>但し書き</label><input id="reprintNote" value="お品代として">
+    </div>
+    <pre id="reprintPreview" style="white-space:pre-wrap;background:#fafafa;padding:10px;border-radius:10px"></pre>
+    <button class="primary" style="width:100%" onclick="executeReprint()">印刷実行</button>
+  </div>
+</div>
+
 <script>
 const $=id=>document.getElementById(id);
 const yen=n=>Number(n||0).toLocaleString('ja-JP')+'円';
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 let data={products:[],tickets:[],settings:{},events:[]},cart={},currentEvent=null,printMode='none';
+let selectedSummary=null,selectedSummaryEvent=null,reprintSale=null,reprintInvoice=false;
 
 function today(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
 function gasUrl(){return localStorage.getItem('pwa_gas_url')||''}
@@ -276,17 +317,62 @@ async function saveGasUrl(){
 }
 
 
+
+function hideMainPanels(){
+  $('eventSelect').classList.add('hidden');$('register').classList.add('hidden');$('manager').classList.add('hidden');$('summaryPanel').classList.add('hidden');
+}
+function showSalesHome(){hideMainPanels();currentEvent=null;$('eventSelect').classList.remove('hidden');showEvents()}
+async function openSummary(){
+  hideMainPanels();$('summaryPanel').classList.remove('hidden');$('summaryDetail').classList.add('hidden');
+  if(navigator.onLine){
+    try{const g=await jsonp('groups');renderSummaryGroups(g||[]);return}catch(e){}
+  }
+  renderSummaryGroups(localGroupSummaries());
+}
+function closeSummary(){showSalesHome()}
+function localAllSales(){
+  const out=[],seen={};const evs=[...(data.events||[])];
+  try{evs.push(...JSON.parse(localStorage.getItem('pwa_local_events')||'[]'))}catch{}
+  evs.forEach(e=>{const k=e.saleDate+'|'+e.outletName;if(seen[k])return;seen[k]=1;localHistory(e).forEach(s=>out.push(s))});
+  return out;
+}
+function localGroupSummaries(){
+  const m={};localAllSales().forEach(s=>{const k=s.saleDate+'|'+s.outletName;if(!m[k])m[k]={saleDate:s.saleDate,outletName:s.outletName,grossSales:0,cashSales:0,paypaySales:0,discountTotal:0,ticketFace:0,ticketDiff:0};
+    const g=m[k];g.grossSales+=Number(s.total||0);g.cashSales+=Number(s.cashAmount||0);g.paypaySales+=Number(s.paypayAmount||0);g.discountTotal+=Number(s.discountAmount||0);
+    (s.items||[]).forEach(i=>{const tq=Number(i.ticketQty||0),p=Number(i.price||0),tv=Number(i.ticketValue||0);if(tq){g.ticketFace+=Math.min(p,tv)*tq;g.ticketDiff+=Math.max(p-tv,0)*tq}})
+  });return Object.values(m);
+}
+function renderSummaryGroups(groups){
+  $('summaryGroups').innerHTML=groups.length?`<table class="summaryTable"><tr><th>日付</th><th>出店</th><th class="money">総売上</th><th class="money">現金</th><th class="money">PayPay</th><th class="money">チケット額</th><th class="money">差額</th></tr>${groups.map(g=>`<tr style="cursor:pointer" onclick='selectSummary(${JSON.stringify(g.saleDate)},${JSON.stringify(g.outletName)})'><td>${esc(g.saleDate)}</td><td>${esc(g.outletName)}</td><td class="money">${yen(g.grossSales)}</td><td class="money">${yen(g.cashSales)}</td><td class="money">${yen(g.paypaySales||0)}</td><td class="money">${yen(g.ticketFace)}</td><td class="money">${yen(g.ticketDiff)}</td></tr>`).join('')}</table>`:'<div class="notice">データなし</div>';
+}
+async function selectSummary(date,name){
+  selectedSummaryEvent={saleDate:date,outletName:name};
+  if(navigator.onLine){try{selectedSummary=await jsonp('summary',{saleDate:date,outletName:name});renderSummaryDetail();return}catch(e){}}
+  selectedSummary=buildLocalSummary(date,name);renderSummaryDetail();
+}
+function buildLocalSummary(date,name){
+  const sales=localHistory({saleDate:date,outletName:name}),s={grossSales:0,cashSales:0,paypaySales:0,discountTotal:0,ticketFace:0,ticketDiff:0,transactions:0,products:{},tickets:{}};
+  sales.forEach(x=>{s.grossSales+=Number(x.total||0);s.cashSales+=Number(x.cashAmount||0);s.paypaySales+=Number(x.paypayAmount||0);s.discountTotal+=Number(x.discountAmount||0);s.transactions++;
+    (x.items||[]).forEach(i=>{const n=i.name||'不明',cq=Number(i.cashQty||0),tq=Number(i.ticketQty||0),qty=Number(i.qty||cq+tq),p=Number(i.price||0),tv=Number(i.ticketValue||0);if(!s.products[n])s.products[n]={cashQty:0,ticketQty:0,qty:0,sales:0};s.products[n].cashQty+=cq;s.products[n].ticketQty+=tq;s.products[n].qty+=qty;s.products[n].sales+=p*qty;if(tq){const tn=i.ticketName||'チケット',face=Math.min(p,tv)*tq,diff=Math.max(p-tv,0)*tq;s.ticketFace+=face;s.ticketDiff+=diff;if(!s.tickets[tn])s.tickets[tn]={count:0,face:0,diff:0};s.tickets[tn].count+=tq;s.tickets[tn].face+=face;s.tickets[tn].diff+=diff;}})
+  });return s;
+}
+function renderSummaryDetail(){
+  const s=selectedSummary||{};$('summaryDetail').classList.remove('hidden');$('summaryTitle').textContent=selectedSummaryEvent.saleDate+'　'+selectedSummaryEvent.outletName;
+  $('summaryKpi').innerHTML=`<div><span>総売上</span><b>${yen(s.grossSales)}</b></div><div><span>現金</span><b>${yen(s.cashSales)}</b></div><div><span>PayPay</span><b>${yen(s.paypaySales||0)}</b></div><div><span>割引</span><b>${yen(s.discountTotal)}</b></div><div><span>チケット額</span><b>${yen(s.ticketFace)}</b></div><div><span>差額</span><b>${yen(s.ticketDiff)}</b></div><div><span>取引件数</span><b>${Number(s.transactions||0)}件</b></div>`;
+  $('summaryProducts').innerHTML=`<table class="summaryTable"><tr><th>商品</th><th>無</th><th>有</th><th>合計</th><th class="money">売上</th></tr>${Object.entries(s.products||{}).map(([n,v])=>`<tr><td>${esc(n)}</td><td>${v.cashQty||0}</td><td>${v.ticketQty||0}</td><td>${v.qty||0}</td><td class="money">${yen(v.sales)}</td></tr>`).join('')}</table>`;
+  $('summaryTickets').innerHTML=Object.keys(s.tickets||{}).length?`<table class="summaryTable"><tr><th>チケット</th><th>枚数</th><th class="money">額</th><th class="money">差額</th></tr>${Object.entries(s.tickets||{}).map(([n,v])=>`<tr><td>${esc(n)}</td><td>${v.count||0}</td><td class="money">${yen(v.face)}</td><td class="money">${yen(v.diff)}</td></tr>`).join('')}</table>`:'チケット利用なし';
+}
+function printSummary(){
+  if(!selectedSummary)return;const s=selectedSummary,e=selectedSummaryEvent,L=['================================','          出 店 別 集 計 表','================================','','日付：'+e.saleDate,'出店：'+e.outletName,'','【売上集計】','総売上　'+yen(s.grossSales||0),'現金　　'+yen(s.cashSales||0),'PayPay　'+yen(s.paypaySales||0),'割引　　'+yen(s.discountTotal||0),'チケット額 '+yen(s.ticketFace||0),'差額　　'+yen(s.ticketDiff||0),''];
+  L.push('【商品別】');Object.entries(s.products||{}).forEach(([n,v])=>L.push('',n,'  チケット無：'+(v.cashQty||0)+'個','  チケット有：'+(v.ticketQty||0)+'個','  合計：'+(v.qty||0)+'個','  売上：'+yen(v.sales||0)));
+  L.push('','【チケット別】');if(Object.keys(s.tickets||{}).length)Object.entries(s.tickets||{}).forEach(([n,v])=>L.push('',n,'  使用枚数：'+(v.count||0)+'枚','  チケット額：'+yen(v.face||0),'  差額：'+yen(v.diff||0)));else L.push('チケット利用なし');printText(L.join('\n'));
+}
 function openManager(){
-  $('eventSelect').classList.add('hidden');
-  $('register').classList.add('hidden');
+  hideMainPanels();
   $('manager').classList.remove('hidden');
   renderManager();
 }
-function closeManager(){
-  $('manager').classList.add('hidden');
-  $('eventSelect').classList.remove('hidden');
-  renderProducts();
-}
+function closeManager(){showSalesHome()}
 function setManagerColor(c){$('mProductColor').value=c}
 function renderManager(){
   $('mProductTicket').innerHTML='<option value="">チケット対象外</option>'+(data.tickets||[]).map(t=>`<option value="${esc(t.id)}">${esc(t.name)}（${yen(t.value)}）</option>`).join('');
@@ -499,8 +585,13 @@ async function syncPending(){
 
 function renderHistory(){
   const h=localHistory(currentEvent);
-  $('history').innerHTML=h.length?`<table><tr><th>時刻</th><th>内容</th><th class="money">現金</th><th class="money">PayPay</th><th class="money">支払</th></tr>${h.slice(0,30).map(s=>`<tr><td>${new Date(s.timestamp).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})}</td><td>${esc((s.items||[]).map(i=>i.name+'×'+i.qty).join('、'))}</td><td class="money">${yen(s.cashAmount)}</td><td class="money">${yen(s.paypayAmount)}</td><td class="money"><b>${yen(s.customerPaid)}</b></td></tr>`).join('')}</table>`:'まだ会計履歴がありません。';
+  $('history').innerHTML=h.length?`<table><tr><th>時刻</th><th>内容</th><th class="money">現金</th><th class="money">PayPay</th><th class="money">支払</th><th>印刷</th></tr>${h.slice(0,50).map(s=>`<tr><td>${new Date(s.timestamp).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})}</td><td>${esc((s.items||[]).map(i=>i.name+'×'+i.qty).join('、'))}</td><td class="money">${yen(s.cashAmount)}</td><td class="money">${yen(s.paypayAmount)}</td><td class="money">${yen(s.customerPaid!==undefined?s.customerPaid:Number(s.cashAmount||0)+Number(s.paypayAmount||0))}</td><td><button class="btn" onclick='openReprint(${JSON.stringify(s.saleId||s.clientSaleId)},"receipt")'>レシート</button> <button class="btn" onclick='openReprint(${JSON.stringify(s.saleId||s.clientSaleId)},"invoice")'>領収書</button></td></tr>`).join('')}</table>`:'まだ会計履歴がありません。';
 }
+function findLocalSale(id){return localHistory(currentEvent).find(s=>String(s.saleId||s.clientSaleId)===String(id))}
+function openReprint(id,mode){reprintSale=findLocalSale(id);if(!reprintSale)return alert('履歴が見つかりません。');reprintInvoice=mode==='invoice';$('reprintTitle').textContent=reprintInvoice?'領収書再印刷':'レシート再印刷';$('reprintInvoiceFields').classList.toggle('hidden',!reprintInvoice);$('reprintTo').value='';$('reprintNote').value='お品代として';$('reprintPreview').textContent=receiptText(reprintSale,reprintInvoice,'','お品代として');$('reprintModal').style.display='flex'}
+function closeReprint(){$('reprintModal').style.display='none'}
+function executeReprint(){printText(receiptText(reprintSale,reprintInvoice,$('reprintTo').value,$('reprintNote').value));closeReprint()}
+
 async function refreshHistoryOnline(){
   try{
     const server=await jsonp('history',{outletName:currentEvent.outletName,saleDate:currentEvent.saleDate});
@@ -529,6 +620,12 @@ function printText(text){
   const d=f.contentWindow.document;d.open();d.write(`<html><head><meta charset="UTF-8"><style>body{font-family:monospace;white-space:pre-wrap;width:58mm;margin:3mm;font-size:12px}@media print{@page{size:58mm auto;margin:3mm}}
 .managerList{width:100%;border-collapse:collapse}.managerList td{padding:8px;border-bottom:1px solid #eee;font-size:13px}
 .colorPresets{display:flex;gap:7px;flex-wrap:wrap;margin-top:7px}.colorPresets button{width:34px;height:34px;border:1px solid #aaa;border-radius:8px}
+
+.summaryKpi{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+.summaryKpi div{background:#f7f7f7;border-radius:10px;padding:10px}
+.summaryKpi span{display:block;font-size:12px;color:#666}.summaryKpi b{display:block;font-size:21px;margin-top:3px}
+.summaryTable{width:100%;border-collapse:collapse}.summaryTable th,.summaryTable td{padding:8px;border-bottom:1px solid #eee;font-size:13px;text-align:left}
+@media(max-width:600px){.summaryKpi{grid-template-columns:repeat(2,1fr)}}
 </style></head><body>${esc(text)}</body></html>`);d.close();
   setTimeout(()=>{f.contentWindow.focus();f.contentWindow.print();setTimeout(()=>f.remove(),1200)},80);
 }
