@@ -47,7 +47,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5.3.3.2</span>
+  <span class="ver">PWA-5.4.3.2</span>
 </header>
 <main>
   <div class="card status">
@@ -620,9 +620,9 @@ function newEvent(){
   if(!$('saleDate').value)return alert('日付を選択してください。');
   $('newEventName').value='';
   $('newEventSet').innerHTML='<option value="">アイテムを選択</option>'+(data.itemSets||[]).map(s=>`<option value="${esc(s.setId)}">${esc(s.setName)}</option>`).join('');
-  $('newEventSetModal').style.display='flex';
+  $('newEventSetModal').classList.remove('hidden');$('newEventSetModal').style.display='flex';
 }
-function closeEventSetModal(){$('newEventSetModal').style.display='none'}
+function closeEventSetModal(){const m=$('newEventSetModal');m.style.display='none';m.classList.add('hidden')}
 async function createEventWithSet(){
   const date=$('saleDate').value,name=$('newEventName').value.trim(),setId=$('newEventSet').value;
   const set=(data.itemSets||[]).find(x=>String(x.setId)===String(setId));
@@ -810,9 +810,31 @@ function renderHistory(){
   $('history').innerHTML=h.length?`<table><tr><th>時刻</th><th>内容</th><th class="money">現金</th><th class="money">PayPay</th><th class="money">支払</th><th>印刷</th></tr>${h.slice(0,50).map(s=>`<tr><td>${new Date(s.timestamp).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})}</td><td>${esc((s.items||[]).map(i=>i.name+'×'+i.qty).join('、'))}</td><td class="money">${yen(s.cashAmount)}</td><td class="money">${yen(s.paypayAmount)}</td><td class="money">${yen(s.customerPaid!==undefined?s.customerPaid:Number(s.cashAmount||0)+Number(s.paypayAmount||0))}</td><td><button class="btn" onclick='openReprint(${JSON.stringify(s.saleId||s.clientSaleId)},"receipt")'>レシート</button> <button class="btn" onclick='openReprint(${JSON.stringify(s.saleId||s.clientSaleId)},"invoice")'>領収書</button></td></tr>`).join('')}</table>`:'まだ会計履歴がありません。';
 }
 function findLocalSale(id){return localHistory(currentEvent).find(s=>String(s.saleId||s.clientSaleId)===String(id))}
-function openReprint(id,mode){reprintSale=findLocalSale(id);if(!reprintSale)return alert('履歴が見つかりません。');reprintInvoice=mode==='invoice';$('reprintTitle').textContent=reprintInvoice?'領収書再印刷':'レシート再印刷';$('reprintInvoiceFields').classList.toggle('hidden',!reprintInvoice);$('reprintTo').value='';$('reprintNote').value='お品代として';$('reprintPreview').textContent=receiptText(reprintSale,reprintInvoice,'','お品代として');$('reprintModal').style.display='flex'}
-function closeReprint(){$('reprintModal').style.display='none'}
-function executeReprint(){printText(receiptText(reprintSale,reprintInvoice,$('reprintTo').value,$('reprintNote').value));closeReprint()}
+function openReprint(id,mode){
+  reprintSale=findLocalSale(id);
+  if(!reprintSale)return alert('履歴が見つかりません。');
+
+  reprintInvoice=(mode==='invoice');
+  $('reprintTitle').textContent=reprintInvoice?'領収書再印刷':'レシート再印刷';
+  $('reprintInvoiceFields').classList.toggle('hidden',!reprintInvoice);
+  $('reprintTo').value='';
+  $('reprintNote').value='お品代として';
+  $('reprintPreview').textContent=receiptText(reprintSale,reprintInvoice,'','お品代として');
+
+  const m=$('reprintModal');
+  m.classList.remove('hidden');
+  m.style.display='flex';
+}
+function closeReprint(){
+  const m=$('reprintModal');
+  m.style.display='none';
+  m.classList.add('hidden');
+}
+function executeReprint(){
+  if(!reprintSale)return;
+  printText(receiptText(reprintSale,reprintInvoice,$('reprintTo').value,$('reprintNote').value));
+  closeReprint();
+}
 
 async function refreshHistoryOnline(){
   try{
@@ -825,18 +847,82 @@ async function refreshHistoryOnline(){
 }
 
 function receiptText(s,isInvoice,to,note){
-  const st=s.settings||{},L=[];
-  if(st.sellerName)L.push(st.sellerName);if(st.companyName)L.push(st.companyName);if(st.invoiceNo)L.push('登録番号 '+st.invoiceNo);if(st.address)L.push(st.address);
-  L.push('',isInvoice?'　　　　領 収 書':'　　　　レ シ ー ト',s.outletName+' / '+s.saleDate,new Date(s.timestamp).toLocaleString('ja-JP'));
-  if(isInvoice&&to)L.push('宛名：'+to);L.push('------------------------------');
-  (s.items||[]).forEach(i=>{if(i.cashQty)L.push(`${i.name} x${i.cashQty} ${yen(i.price*i.cashQty)}`);if(i.ticketQty){L.push(`${i.name} x${i.ticketQty} ${yen(i.price*i.ticketQty)}`);L.push('  チケット利用（お客様負担 0円）')}});
-  L.push('------------------------------','商品合計 '+yen(s.total));if(s.discountAmount)L.push('割引 -'+yen(s.discountAmount));if(s.paypayAmount)L.push('PayPay '+yen(s.paypayAmount));if(s.cashAmount)L.push('現金 '+yen(s.cashAmount));L.push('お客様支払 '+yen(s.customerPaid));
-  if(isInvoice){L.push('領収金額 '+yen(s.customerPaid));if(note)L.push(note)}
+  const st=s.settings||data.settings||{},L=[];
+  if(st.sellerName)L.push(st.sellerName);
+  if(st.companyName)L.push(st.companyName);
+  if(st.invoiceNo)L.push('登録番号 '+st.invoiceNo);
+  if(st.address)L.push(st.address);
+
+  L.push(
+    '',
+    isInvoice?'　　　　領 収 書':'　　　　レ シ ー ト',
+    String(s.outletName||'')+' / '+String(s.saleDate||''),
+    new Date(s.timestamp).toLocaleString('ja-JP')
+  );
+
+  if(isInvoice&&to)L.push('宛名：'+to);
   L.push('------------------------------');
-  const rates={};(s.items||[]).forEach(i=>{const r=Number(i.taxRate||8);rates[r]=(rates[r]||0)+i.price*i.qty});
-  Object.entries(rates).forEach(([r,a])=>{const tax=Math.floor(a*Number(r)/(100+Number(r)));L.push(`${r}%対象 ${yen(a)}`);L.push(`消費税額等 ${yen(tax)}`)});
-  if(rates[8])L.push('※ 軽減税率対象');if(st.receiptFooter)L.push('',st.receiptFooter);return L.join('\n');
+
+  // PWAで端末保存した履歴(cashQty/ticketQty)と、
+  // GASから取得した過去履歴(paymentType)の両方に対応。
+  (s.items||[]).forEach(i=>{
+    const price=Number(i.price||0);
+    const qty=Number(i.qty||0);
+    const cashQty=Number(i.cashQty||0);
+    const ticketQty=Number(i.ticketQty||0);
+
+    if(cashQty || ticketQty){
+      if(cashQty)L.push(`${i.name} x${cashQty} ${yen(price*cashQty)}`);
+      if(ticketQty){
+        L.push(`${i.name} x${ticketQty} ${yen(price*ticketQty)}`);
+        L.push('  チケット利用（お客様負担 0円）');
+      }
+    }else{
+      // GAS履歴は1行ごとに cash / ticket が分かれている
+      L.push(`${i.name} x${qty} ${yen(price*qty)}`);
+      if(String(i.paymentType||'')==='ticket'){
+        L.push('  チケット利用（お客様負担 0円）');
+      }
+    }
+  });
+
+  L.push('------------------------------','商品合計 '+yen(s.total||0));
+
+  if(Number(s.discountAmount||0))L.push('割引 -'+yen(s.discountAmount));
+  if(Number(s.paypayAmount||0))L.push('PayPay '+yen(s.paypayAmount));
+  if(Number(s.cashAmount||0))L.push('現金 '+yen(s.cashAmount));
+
+  const customerPaid = s.customerPaid!==undefined && s.customerPaid!==null
+    ? Number(s.customerPaid||0)
+    : Number(s.cashAmount||0)+Number(s.paypayAmount||0);
+
+  L.push('お客様支払 '+yen(customerPaid));
+
+  if(isInvoice){
+    L.push('領収金額 '+yen(customerPaid));
+    if(note)L.push(note);
+  }
+
+  L.push('------------------------------');
+
+  const rates={};
+  (s.items||[]).forEach(i=>{
+    const r=Number(i.taxRate||8);
+    const qty=Number(i.qty||Number(i.cashQty||0)+Number(i.ticketQty||0));
+    rates[r]=(rates[r]||0)+Number(i.price||0)*qty;
+  });
+  Object.entries(rates).forEach(([r,a])=>{
+    const tax=Math.floor(a*Number(r)/(100+Number(r)));
+    L.push(`${r}%対象 ${yen(a)}`);
+    L.push(`消費税額等 ${yen(tax)}`);
+  });
+
+  if(rates[8])L.push('※ 軽減税率対象');
+  if(st.receiptFooter)L.push('',st.receiptFooter);
+
+  return L.join('\n');
 }
+
 function printText(text){
   const old=$('printFrame');if(old)old.remove();const f=document.createElement('iframe');f.id='printFrame';f.style='position:fixed;width:1px;height:1px;opacity:0;border:0;right:0;bottom:0';document.body.appendChild(f);
   const d=f.contentWindow.document;d.open();d.write(`<html><head><meta charset="UTF-8"><style>body{font-family:monospace;white-space:pre-wrap;width:58mm;margin:3mm;font-size:12px}@media print{@page{size:58mm auto;margin:3mm}}
