@@ -47,7 +47,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5</span>
+  <span class="ver">PWA-5.1</span>
 </header>
 <main>
   <div class="card status">
@@ -415,12 +415,68 @@ function printSummary(){
   L.push('','【チケット別】');if(Object.keys(s.tickets||{}).length)Object.entries(s.tickets||{}).forEach(([n,v])=>L.push('',n,'  使用枚数：'+(v.count||0)+'枚','  チケット額：'+yen(v.face||0),'  差額：'+yen(v.diff||0)));else L.push('チケット利用なし');printText(L.join('\n'));
 }
 let workingSetItems=[];
+
+function ensureLegacyItemSet(){
+  if((data.itemSets||[]).length===0 && (data.products||[]).length){
+    const migrated={
+      setId:'set_migrated_20260823',
+      setName:'2026.8.23鯖江納涼祭',
+      items:(data.products||[]).map(p=>({
+        productId:String(p.id||''),
+        name:String(p.name||''),
+        price:Number(p.price||0),
+        taxRate:Number(p.taxRate||8),
+        ticketId:String(p.ticketId||''),
+        color:String(p.color||'#ffffff'),
+        active:!(p.active===false || String(p.active).toLowerCase()==='false' || Number(p.active)===0)
+      }))
+    };
+    data.itemSets=[migrated];
+    cacheMaster();
+    if(navigator.onLine){
+      postApi('saveItemSet',migrated).catch(()=>queueMaster('saveItemSet',migrated));
+    }else{
+      queueMaster('saveItemSet',migrated);
+    }
+  }
+}
+
 function openItemSetManager(){
   hideMainPanels();$('itemSetManager').classList.remove('hidden');
-  // 旧版から最初の1件だけ存在する場合は、分かりやすい名称へ自動移行
-  if((data.itemSets||[]).length===1 && !String(data.itemSets[0].setName||'').includes('鯖江納涼祭')){
-    data.itemSets[0].setName='2026.8.23鯖江納涼祭';cacheMaster();
-    const p={...data.itemSets[0]}; if(navigator.onLine){postApi('saveItemSet',p).catch(()=>queueMaster('saveItemSet',p))}else queueMaster('saveItemSet',p);
+  // PWA-4以前の登録商品を、初回だけ1つのアイテム設定へ自動移行。
+  // これまでの商品名・価格・税率・色・対応チケットをそのまま引き継ぐ。
+  if((data.itemSets||[]).length===0 && (data.products||[]).length){
+    const migrated={
+      setId:'set_migrated_20260823',
+      setName:'2026.8.23鯖江納涼祭',
+      items:(data.products||[]).map(p=>({
+        productId:String(p.id||''),
+        name:String(p.name||''),
+        price:Number(p.price||0),
+        taxRate:Number(p.taxRate||8),
+        ticketId:String(p.ticketId||''),
+        color:String(p.color||'#ffffff'),
+        active:!(p.active===false || String(p.active).toLowerCase()==='false' || Number(p.active)===0)
+      }))
+    };
+    data.itemSets=[migrated];
+    cacheMaster();
+
+    if(navigator.onLine){
+      postApi('saveItemSet',migrated)
+        .catch(()=>queueMaster('saveItemSet',migrated));
+    }else{
+      queueMaster('saveItemSet',migrated);
+    }
+  }else if((data.itemSets||[]).length===1 && !String(data.itemSets[0].setName||'').trim()){
+    data.itemSets[0].setName='2026.8.23鯖江納涼祭';
+    cacheMaster();
+    const p={...data.itemSets[0]};
+    if(navigator.onLine){
+      postApi('saveItemSet',p).catch(()=>queueMaster('saveItemSet',p));
+    }else{
+      queueMaster('saveItemSet',p);
+    }
   }
   backToItemList();renderSetList();
 }
@@ -514,7 +570,7 @@ async function refreshMaster(showAlert=true){
   try{
     const b=await jsonp('bootstrap');
     data.products=b.products||[];data.tickets=b.tickets||[];data.settings=b.settings||{};data.events=b.events||[];data.itemSets=b.itemSets||[];
-    cacheMaster();showEvents();
+    ensureLegacyItemSet();cacheMaster();showEvents();
     if(showAlert)alert('商品・チケット設定を更新しました。');
   }catch(e){if(showAlert)alert(e.message)}
 }
