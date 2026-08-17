@@ -47,7 +47,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5.4.3.2</span>
+  <span class="ver">PWA-5.5.3.2</span>
 </header>
 <main>
   <div class="card status">
@@ -234,7 +234,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
   </div>
 </main>
 
-<div id="newItemChoiceModal" class="hidden" style="position:fixed;inset:0;background:#0008;z-index:70;align-items:center;justify-content:center">
+<div id="newItemChoiceModal" class="hidden" onclick="if(event.target===this)closeNewItemChoice()" style="position:fixed;inset:0;background:#0008;z-index:70;align-items:center;justify-content:center">
   <div class="card" style="width:min(560px,94vw)">
     <h3 style="margin-top:0">新しいアイテムを作成</h3>
     <div class="notice">作り方を選んでください。</div>
@@ -485,9 +485,16 @@ function backToItemList(){$('itemSetListView').classList.remove('hidden');$('ite
 function openNewItemChoice(){
   $('copySourceChoice').classList.add('hidden');
   $('copySourceSet').innerHTML=(data.itemSets||[]).map(x=>`<option value="${esc(x.setId)}">${esc(x.setName)}</option>`).join('');
-  $('newItemChoiceModal').style.display='flex';
+
+  const m=$('newItemChoiceModal');
+  m.classList.remove('hidden');
+  m.style.display='flex';
 }
-function closeNewItemChoice(){$('newItemChoiceModal').style.display='none'}
+function closeNewItemChoice(){
+  const m=$('newItemChoiceModal');
+  m.style.display='none';
+  m.classList.add('hidden');
+}
 function showCopySourceChoice(){if(!(data.itemSets||[]).length)return alert('コピーできる既存アイテムがありません。');$('copySourceChoice').classList.remove('hidden')}
 function startBlankItem(){closeNewItemChoice();$('setId').value='';$('setName').value='';workingSetItems=(data.products||[]).map(p=>({productId:p.id,name:p.name,price:Number(p.price||0),taxRate:Number(p.taxRate||8),ticketId:String(p.ticketId||''),color:String(p.color||'#fff'),active:false}));showSetEdit()}
 function startCopiedItem(){const id=$('copySourceSet').value,s=(data.itemSets||[]).find(x=>String(x.setId)===String(id));if(!s)return;closeNewItemChoice();$('setId').value='';$('setName').value='';workingSetItems=(s.items||[]).map(x=>({...x}));showSetEdit()}
