@@ -47,7 +47,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5.1</span>
+  <span class="ver">PWA-5.3.3.2</span>
 </header>
 <main>
   <div class="card status">
@@ -570,31 +570,51 @@ async function refreshMaster(showAlert=true){
   try{
     const b=await jsonp('bootstrap');
     data.products=b.products||[];data.tickets=b.tickets||[];data.settings=b.settings||{};data.events=b.events||[];data.itemSets=b.itemSets||[];
-    ensureLegacyItemSet();cacheMaster();showEvents();
+    ensureLegacyItemSet();
+
+    // GASで過去レジに紐付けたアイテム群を、この端末のローカルイベントにも反映
+    (data.events||[]).forEach(e=>saveLocalEvent(e));
+
+    cacheMaster();
+    showEvents();
     if(showAlert)alert('商品・チケット設定を更新しました。');
   }catch(e){if(showAlert)alert(e.message)}
 }
 
 function eventsForDate(date){
   const map={};
-  (data.events||[]).forEach(e=>{if(e.saleDate===date)map[e.outletName]=e});
-  // Local-only events
+
+  // ローカルを先に読み込み
   try{
     const local=JSON.parse(localStorage.getItem('pwa_local_events')||'[]');
-    local.forEach(e=>{if(e.saleDate===date)map[e.outletName]=e});
+    local.forEach(e=>{
+      if(e.saleDate===date)map[e.outletName]=e;
+    });
   }catch{}
+
+  // GAS側を後から重ねる。
+  // これにより過去端末に残る古いsetIdなしデータより、
+  // GASで設定した「鯖江納涼祭」紐付けを優先する。
+  (data.events||[]).forEach(e=>{
+    if(e.saleDate===date){
+      map[e.outletName]={...(map[e.outletName]||{}),...e};
+    }
+  });
+
   return Object.values(map).sort((a,b)=>a.outletName.localeCompare(b.outletName,'ja'));
 }
 function saveLocalEvent(e){
   let a=[];try{a=JSON.parse(localStorage.getItem('pwa_local_events')||'[]')}catch{}
-  if(!a.some(x=>x.saleDate===e.saleDate&&x.outletName===e.outletName))a.push(e);
+  const i=a.findIndex(x=>x.saleDate===e.saleDate&&x.outletName===e.outletName);
+  if(i>=0)a[i]={...a[i],...e};
+  else a.push(e);
   localStorage.setItem('pwa_local_events',JSON.stringify(a));
 }
 
 function showEvents(){
   const date=$('saleDate').value;if(!date)return;
   const es=eventsForDate(date);
-  $('eventList').innerHTML=es.length?es.map(e=>`<div class="event"><button class="btn" onclick='openEvent(${JSON.stringify(e.outletName)})'>${esc(e.outletName)}</button></div>`).join(''):'<div class="notice">この日の出店はありません。</div>';
+  $('eventList').innerHTML=es.length?es.map(e=>`<div class="event"><button class="btn" onclick='openEvent(${JSON.stringify(e.outletName)})'><b>${esc(e.outletName)}</b>${e.setName?`<div class="notice">使用アイテム：${esc(e.setName)}</div>`:''}</button></div>`).join(''):'<div class="notice">この日の出店はありません。</div>';
 }
 function newEvent(){
   if(!$('saleDate').value)return alert('日付を選択してください。');
@@ -614,30 +634,81 @@ async function createEventWithSet(){
   closeEventSetModal();showEvents();openEvent(name);
 }
 
+function legacyDefaultSet(){
+  const sets=data.itemSets||[];
+  return sets.find(s=>String(s.setName||'').replace(/\s/g,'').includes('2026.8.23鯖江納涼祭'))
+      || sets.find(s=>String(s.setId||'')==='set_migrated_20260823')
+      || (sets.length===1?sets[0]:null);
+}
+
 function openEvent(name){
   const date=$('saleDate').value;
-  currentEvent=eventsForDate(date).find(x=>String(x.outletName)===String(name))||{saleDate:date,outletName:name,setId:'',setName:''};
-  saveLocalEvent(currentEvent);
-  $('eventSelect').classList.add('hidden');$('register').classList.remove('hidden');
+  currentEvent=eventsForDate(date).find(x=>String(x.outletName)===String(name))
+    || {saleDate:date,outletName:name,setId:'',setName:''};
+
+  // PWA-4より前に作ったレジには setId が無いため、
+  // 既存の「2026.8.23鯖江納涼祭」を自動で紐づけて過去レジを復旧する。
+  if(!currentEvent.setId){
+    const legacy=legacyDefaultSet();
+    if(legacy){
+      currentEvent={...currentEvent,setId:legacy.setId,setName:legacy.setName};
+      saveLocalEvent(currentEvent);
+
+      // オンラインならGAS側の過去レジにも紐づけを保存。
+      if(navigator.onLine){
+        postApi('createEvent',currentEvent)
+          .catch(()=>queueMaster('createEvent',currentEvent));
+      }else{
+        queueMaster('createEvent',currentEvent);
+      }
+    }
+  }else{
+    saveLocalEvent(currentEvent);
+  }
+
+  $('eventSelect').classList.add('hidden');
+  $('register').classList.remove('hidden');
   $('activeEvent').textContent=currentEvent.saleDate+'　'+currentEvent.outletName+(currentEvent.setName?'　【'+currentEvent.setName+'】':'');
-  renderProducts();renderCart();renderHistory();
+  renderProducts();
+  renderCart();
+  renderHistory();
   if(navigator.onLine)refreshHistoryOnline();
 }
 function backEvents(){currentEvent=null;cart={};$('register').classList.add('hidden');$('eventSelect').classList.remove('hidden');showEvents()}
 
 function activeSetItems(){
-  if(!currentEvent||!currentEvent.setId)return [];
-  const set=(data.itemSets||[]).find(x=>String(x.setId)===String(currentEvent.setId));
-  return set&&Array.isArray(set.items)?set.items:[];
+  if(!currentEvent)return [];
+
+  let set=null;
+  if(currentEvent.setId){
+    set=(data.itemSets||[]).find(x=>String(x.setId)===String(currentEvent.setId));
+  }
+  if(!set)set=legacyDefaultSet();
+
+  if(set && Array.isArray(set.items) && set.items.length){
+    return set.items;
+  }
+
+  // 最終保険：古いレジでアイテム群情報が無くても、
+  // 既存商品マスターから商品・色・価格を復元してレジを空にしない。
+  return (data.products||[]).map(p=>({
+    productId:String(p.id||''),
+    name:String(p.name||''),
+    price:Number(p.price||0),
+    taxRate:Number(p.taxRate||8),
+    ticketId:String(p.ticketId||''),
+    color:String(p.color||'#ffffff'),
+    active:!(p.active===false || String(p.active).toLowerCase()==='false' || Number(p.active)===0)
+  }));
 }
 function product(id){
   const si=activeSetItems().find(x=>String(x.productId)===String(id));
   const b=(data.products||[]).find(p=>String(p.id)===String(id))||{};
-  return si?{...b,id:String(si.productId),name:String(si.name||b.name||''),price:Number(si.price!==undefined?si.price:(b.price||0)),taxRate:Number(si.taxRate||b.taxRate||8),ticketId:String(si.ticketId!==undefined?si.ticketId:(b.ticketId||'')),color:String(si.color||b.color||'#fff')}:b;
+  return si?{...b,id:String(si.productId),name:String(si.name||b.name||''),price:Number(si.price!==undefined?si.price:(b.price||0)),taxRate:Number(si.taxRate||b.taxRate||8),ticketId:String(si.ticketId!==undefined?si.ticketId:(b.ticketId||'')),color:String(si.color||b.color||'#ffffff')}:b;
 }
 function renderProducts(){
   const items=activeSetItems().filter(x=>x.active!==false);
-  $('productGrid').innerHTML=items.length?items.map(si=>{const p=product(si.productId),t=(data.tickets||[]).find(x=>String(x.id)===String(p.ticketId));return `<div class="product" style="--c:${esc(p.color||'#fff')}"><b>${esc(p.name)}</b><span class="price">${yen(p.price)}</span><div class="productBtns"><button class="cashAdd" onclick='addItem(${JSON.stringify(p.id)},"cash",1)'>チケット無</button><button class="ticketAdd" ${t?'':'disabled'} onclick='addItem(${JSON.stringify(p.id)},"ticket",1)'>チケット有</button></div></div>`}).join(''):'<div class="card" style="grid-column:1/-1">このレジに商品が設定されていません。</div>';
+  $('productGrid').innerHTML=items.length?items.map(si=>{const p=product(si.productId),t=(data.tickets||[]).find(x=>String(x.id)===String(p.ticketId));return `<div class="product" style="--c:${esc(p.color||'#ffffff')}"><b>${esc(p.name)}</b><span class="price">${yen(p.price)}</span><div class="productBtns"><button class="cashAdd" onclick='addItem(${JSON.stringify(p.id)},"cash",1)'>チケット無</button><button class="ticketAdd" ${t?'':'disabled'} onclick='addItem(${JSON.stringify(p.id)},"ticket",1)'>チケット有</button></div></div>`}).join(''):'<div class="card" style="grid-column:1/-1">このレジに商品が設定されていません。</div>';
 }
 function ticketFor(p){return data.tickets.find(t=>String(t.id)===String(p.ticketId))}
 function addItem(id,mode,d){

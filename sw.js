@@ -1,4 +1,4 @@
-const CACHE='kitchen-car-pos-pwa-v5-1';
+const CACHE='kitchen-car-pos-pwa-v5-3-3-2';
 const ASSETS=['./','./index.html','./manifest.json','./icon-192.png','./icon-512.png'];
 
 self.addEventListener('install',e=>{
