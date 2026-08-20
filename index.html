@@ -714,7 +714,13 @@ function product(id){
   return si?{...b,id:String(si.productId),name:String(si.name||b.name||''),price:Number(si.price!==undefined?si.price:(b.price||0)),taxRate:Number(si.taxRate||b.taxRate||8),ticketId:String(si.ticketId!==undefined?si.ticketId:(b.ticketId||'')),color:String(si.color||b.color||'#ffffff')}:b;
 }
 function renderProducts(){
-  const items=activeSetItems().filter(x=>x.active!==false);
+  const items=activeSetItems().filter(x=>x.active!==false).sort((a,b)=>{
+    const pa=(data.products||[]).find(p=>String(p.id)===String(a.productId))||{};
+    const pb=(data.products||[]).find(p=>String(p.id)===String(b.productId))||{};
+    const sa=Number(pa.sort||0), sb=Number(pb.sort||0);
+    if(sa!==sb)return sa-sb;
+    return String(a.name||pa.name||'').localeCompare(String(b.name||pb.name||''),'ja');
+  });
   $('productGrid').innerHTML=items.length?items.map(si=>{const p=product(si.productId),t=(data.tickets||[]).find(x=>String(x.id)===String(p.ticketId));return `<div class="product" style="--c:${esc(p.color||'#ffffff')}"><b>${esc(p.name)}</b><span class="price">${yen(p.price)}</span><div class="productBtns"><button class="cashAdd" onclick='addItem(${JSON.stringify(p.id)},"cash",1)'>チケット無</button><button class="ticketAdd" ${t?'':'disabled'} onclick='addItem(${JSON.stringify(p.id)},"ticket",1)'>チケット有</button></div></div>`}).join(''):'<div class="card" style="grid-column:1/-1">このレジに商品が設定されていません。</div>';
 }
 function ticketFor(p){return data.tickets.find(t=>String(t.id)===String(p.ticketId))}
