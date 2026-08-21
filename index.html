@@ -47,7 +47,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5.7.3.2</span>
+  <span class="ver">PWA-5.9.0</span>
 </header>
 <main>
   <div class="card status">
@@ -102,7 +102,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
     <div id="summaryDetail" class="hidden">
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
-          <b id="summaryTitle"></b><button class="btn" onclick="printSummary()">集計表を印刷</button>
+          <b id="summaryTitle"></b><div class="actions"><button class="btn" onclick="printSummary()">集計表を印刷</button><button class="danger" onclick="deleteSummaryData()">この集計を削除</button></div>
         </div>
         <div id="summaryKpi" class="summaryKpi"></div>
       </div>
@@ -191,6 +191,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
         <input id="discount" type="number" min="0" value="0" inputmode="numeric">
       </div>
 
+      <div class="bigPay" style="background:#fff4d6"><span>総売上（チケット使用分を含む）</span><b id="grossTotal">0円</b></div>
       <div class="bigPay"><span>お客様お支払額</span><b id="customerPay">0円</b></div>
 
       <div style="border-top:1px solid #eee;padding-top:12px">
@@ -224,7 +225,12 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
         <label>但し書き</label><input id="invoiceNote" value="お品代として">
       </div>
 
-      <button class="primary" style="width:100%;font-size:18px;padding:16px" onclick="checkout()">会計確定</button>
+      <div id="editSaleBanner" class="hidden" style="background:#fff4d6;border:1px solid #e0b54c;border-radius:10px;padding:10px;margin:12px 0">
+        <b>会計履歴を編集中</b>
+        <div class="notice">内容を直して「変更を保存」を押してください。</div>
+        <button class="btn" style="margin-top:7px" onclick="cancelSaleEdit()">編集をやめる</button>
+      </div>
+      <button id="checkoutBtn" class="primary" style="width:100%;font-size:18px;padding:16px" onclick="checkout()">会計確定</button>
     </div>
 
     <div class="card history">
@@ -275,6 +281,7 @@ const yen=n=>Number(n||0).toLocaleString('ja-JP')+'円';
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 let data={products:[],tickets:[],settings:{},events:[],itemSets:[]},cart={},currentEvent=null,printMode='none';
 let selectedSummary=null,selectedSummaryEvent=null,reprintSale=null,reprintInvoice=false;
+let editingSaleKey=null,editingSaleOriginal=null,editingPendingSale=false;
 
 function today(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
 function gasUrl(){return localStorage.getItem('pwa_gas_url')||''}
@@ -292,7 +299,8 @@ function savePendingMaster(q){
 }
 function queueMaster(action,payload){
   const q=pendingMaster();
-  const key=action+':'+String(payload.id||'');
+  const entityKey=payload.id||payload.setId||((payload.saleDate||'')+'|'+(payload.outletName||''))||'single';
+  const key=action+':'+String(entityKey);
   // 同じ商品/チケットの未同期変更は最新内容に置き換える
   const filtered=q.filter(x=>x.key!==key);
   filtered.push({key,action,payload});
@@ -378,15 +386,28 @@ async function openSummary(){
 }
 function closeSummary(){showSalesHome()}
 function localAllSales(){
-  const out=[],seen={};const evs=[...(data.events||[])];
-  try{evs.push(...JSON.parse(localStorage.getItem('pwa_local_events')||'[]'))}catch{}
-  evs.forEach(e=>{const k=e.saleDate+'|'+e.outletName;if(seen[k])return;seen[k]=1;localHistory(e).forEach(s=>out.push(s))});
+  // レジ自体を削除しても、会計済み履歴は集計に残す。
+  // Events一覧ではなく、端末に保存されている全履歴を直接読む。
+  const out=[],seen={};
+  for(let i=0;i<localStorage.length;i++){
+    const k=localStorage.key(i);
+    if(!k || !k.startsWith('pwa_history_'))continue;
+    try{
+      const a=JSON.parse(localStorage.getItem(k)||'[]');
+      (a||[]).forEach(s=>{
+        const sk=String(s.clientSaleId||s.saleId||'') || (String(s.timestamp||'')+'|'+String(s.outletName||''));
+        if(seen[sk])return;
+        seen[sk]=1;
+        out.push(s);
+      });
+    }catch{}
+  }
   return out;
 }
 function localGroupSummaries(){
   const m={};localAllSales().forEach(s=>{const k=s.saleDate+'|'+s.outletName;if(!m[k])m[k]={saleDate:s.saleDate,outletName:s.outletName,grossSales:0,cashSales:0,paypaySales:0,discountTotal:0,ticketFace:0,ticketDiff:0};
     const g=m[k];g.grossSales+=Number(s.total||0);g.cashSales+=Number(s.cashAmount||0);g.paypaySales+=Number(s.paypayAmount||0);g.discountTotal+=Number(s.discountAmount||0);
-    (s.items||[]).forEach(i=>{const tq=Number(i.ticketQty||0),p=Number(i.price||0),tv=Number(i.ticketValue||0);if(tq){g.ticketFace+=Math.min(p,tv)*tq;g.ticketDiff+=Math.max(p-tv,0)*tq}})
+    (s.items||[]).forEach(i=>{const qty=Number(i.qty||0),tq=i.ticketQty!==undefined?Number(i.ticketQty||0):(String(i.paymentType||'')==='ticket'?qty:0),p=Number(i.price||0),tv=Number(i.ticketValue||0);if(tq){g.ticketFace+=Math.min(p,tv)*tq;g.ticketDiff+=Math.max(p-tv,0)*tq}})
   });return Object.values(m);
 }
 function renderSummaryGroups(groups){
@@ -400,7 +421,7 @@ async function selectSummary(date,name){
 function buildLocalSummary(date,name){
   const sales=localHistory({saleDate:date,outletName:name}),s={grossSales:0,cashSales:0,paypaySales:0,discountTotal:0,ticketFace:0,ticketDiff:0,transactions:0,products:{},tickets:{}};
   sales.forEach(x=>{s.grossSales+=Number(x.total||0);s.cashSales+=Number(x.cashAmount||0);s.paypaySales+=Number(x.paypayAmount||0);s.discountTotal+=Number(x.discountAmount||0);s.transactions++;
-    (x.items||[]).forEach(i=>{const n=i.name||'不明',cq=Number(i.cashQty||0),tq=Number(i.ticketQty||0),qty=Number(i.qty||cq+tq),p=Number(i.price||0),tv=Number(i.ticketValue||0);if(!s.products[n])s.products[n]={cashQty:0,ticketQty:0,qty:0,sales:0};s.products[n].cashQty+=cq;s.products[n].ticketQty+=tq;s.products[n].qty+=qty;s.products[n].sales+=p*qty;if(tq){const tn=i.ticketName||'チケット',face=Math.min(p,tv)*tq,diff=Math.max(p-tv,0)*tq;s.ticketFace+=face;s.ticketDiff+=diff;if(!s.tickets[tn])s.tickets[tn]={count:0,face:0,diff:0};s.tickets[tn].count+=tq;s.tickets[tn].face+=face;s.tickets[tn].diff+=diff;}})
+    (x.items||[]).forEach(i=>{const n=i.name||'不明',rawQty=Number(i.qty||0),cq=i.cashQty!==undefined?Number(i.cashQty||0):(String(i.paymentType||'')==='ticket'?0:rawQty),tq=i.ticketQty!==undefined?Number(i.ticketQty||0):(String(i.paymentType||'')==='ticket'?rawQty:0),qty=Number(i.qty||cq+tq),p=Number(i.price||0),tv=Number(i.ticketValue||0);if(!s.products[n])s.products[n]={cashQty:0,ticketQty:0,qty:0,sales:0};s.products[n].cashQty+=cq;s.products[n].ticketQty+=tq;s.products[n].qty+=qty;s.products[n].sales+=p*qty;if(tq){const tn=i.ticketName||'チケット',face=Math.min(p,tv)*tq,diff=Math.max(p-tv,0)*tq;s.ticketFace+=face;s.ticketDiff+=diff;if(!s.tickets[tn])s.tickets[tn]={count:0,face:0,diff:0};s.tickets[tn].count+=tq;s.tickets[tn].face+=face;s.tickets[tn].diff+=diff;}})
   });return s;
 }
 function renderSummaryDetail(){
@@ -409,6 +430,31 @@ function renderSummaryDetail(){
   $('summaryProducts').innerHTML=`<table class="summaryTable"><tr><th>商品</th><th>無</th><th>有</th><th>合計</th><th class="money">売上</th></tr>${Object.entries(s.products||{}).map(([n,v])=>`<tr><td>${esc(n)}</td><td>${v.cashQty||0}</td><td>${v.ticketQty||0}</td><td>${v.qty||0}</td><td class="money">${yen(v.sales)}</td></tr>`).join('')}</table>`;
   $('summaryTickets').innerHTML=Object.keys(s.tickets||{}).length?`<table class="summaryTable"><tr><th>チケット</th><th>枚数</th><th class="money">額</th><th class="money">差額</th></tr>${Object.entries(s.tickets||{}).map(([n,v])=>`<tr><td>${esc(n)}</td><td>${v.count||0}</td><td class="money">${yen(v.face)}</td><td class="money">${yen(v.diff)}</td></tr>`).join('')}</table>`:'チケット利用なし';
 }
+
+function purgeLocalSalesForEvent(date,name){
+  saveHistory({saleDate:date,outletName:name},[]);
+  const q=pending().filter(p=>!(String(p.saleDate||'')===String(date)&&String(p.outletName||'')===String(name)));
+  savePending(q);
+}
+async function deleteSummaryData(){
+  if(!selectedSummaryEvent)return;
+  if(!navigator.onLine)return alert('集計データの削除はオンライン時に行ってください。');
+  const e=selectedSummaryEvent;
+  if(!confirm(`「${e.saleDate} ${e.outletName}」の会計履歴・集計データを削除しますか？\n\nこの操作をすると総売上・商品別・チケット別の集計から消えます。\nレジ（出店枠）は残ります。`))return;
+  try{
+    await postApi('voidEventSales',{saleDate:e.saleDate,outletName:e.outletName});
+    purgeLocalSalesForEvent(e.saleDate,e.outletName);
+    selectedSummary=null;selectedSummaryEvent=null;
+    $('summaryDetail').classList.add('hidden');
+    await new Promise(r=>setTimeout(r,700));
+    const g=await jsonp('groups');
+    renderSummaryGroups(g||[]);
+    alert('集計データを削除しました。');
+  }catch(err){
+    alert('削除できませんでした：'+(err.message||err));
+  }
+}
+
 function printSummary(){
   if(!selectedSummary)return;const s=selectedSummary,e=selectedSummaryEvent,L=['================================','          出 店 別 集 計 表','================================','','日付：'+e.saleDate,'出店：'+e.outletName,'','【売上集計】','総売上　'+yen(s.grossSales||0),'現金　　'+yen(s.cashSales||0),'PayPay　'+yen(s.paypaySales||0),'割引　　'+yen(s.discountTotal||0),'チケット額 '+yen(s.ticketFace||0),'差額　　'+yen(s.ticketDiff||0),''];
   L.push('【商品別】');Object.entries(s.products||{}).forEach(([n,v])=>L.push('',n,'  チケット無：'+(v.cashQty||0)+'個','  チケット有：'+(v.ticketQty||0)+'個','  合計：'+(v.qty||0)+'個','  売上：'+yen(v.sales||0)));
@@ -608,7 +654,18 @@ function eventsForDate(date){
     }
   });
 
-  return Object.values(map).sort((a,b)=>a.outletName.localeCompare(b.outletName,'ja'));
+  return Object.values(map).filter(e=>!isEventDeleted(e.saleDate,e.outletName)).sort((a,b)=>a.outletName.localeCompare(b.outletName,'ja'));
+}
+function deletedEventKey(date,name){return String(date)+'|'+String(name)}
+function deletedEvents(){try{return JSON.parse(localStorage.getItem('pwa_deleted_events')||'{}')}catch{return {}}}
+function saveDeletedEvents(o){localStorage.setItem('pwa_deleted_events',JSON.stringify(o||{}))}
+function isEventDeleted(date,name){return !!deletedEvents()[deletedEventKey(date,name)]}
+function markEventDeleted(date,name){const o=deletedEvents();o[deletedEventKey(date,name)]=true;saveDeletedEvents(o)}
+function unmarkEventDeleted(date,name){const o=deletedEvents();delete o[deletedEventKey(date,name)];saveDeletedEvents(o)}
+function removeLocalEvent(date,name){
+  let a=[];try{a=JSON.parse(localStorage.getItem('pwa_local_events')||'[]')}catch{}
+  a=a.filter(x=>!(x.saleDate===date&&x.outletName===name));
+  localStorage.setItem('pwa_local_events',JSON.stringify(a));
 }
 function saveLocalEvent(e){
   let a=[];try{a=JSON.parse(localStorage.getItem('pwa_local_events')||'[]')}catch{}
@@ -617,11 +674,26 @@ function saveLocalEvent(e){
   else a.push(e);
   localStorage.setItem('pwa_local_events',JSON.stringify(a));
 }
+async function deleteRegisterEvent(date,name){
+  if(!confirm(`「${name}」のレジを削除しますか？\n\n会計済みの売上・履歴は削除しません。\n集計にはそのまま残ります。`))return;
+  markEventDeleted(date,name);
+  removeLocalEvent(date,name);
+  data.events=(data.events||[]).filter(e=>!(e.saleDate===date&&e.outletName===name));
+  cacheMaster();
+  showEvents();
+  const payload={saleDate:date,outletName:name};
+  if(navigator.onLine){
+    try{await postApi('deleteEventSafe',payload)}
+    catch{queueMaster('deleteEventSafe',payload)}
+  }else{
+    queueMaster('deleteEventSafe',payload);
+  }
+}
 
 function showEvents(){
   const date=$('saleDate').value;if(!date)return;
   const es=eventsForDate(date);
-  $('eventList').innerHTML=es.length?es.map(e=>`<div class="event"><button class="btn" onclick='openEvent(${JSON.stringify(e.outletName)})'><b>${esc(e.outletName)}</b>${e.setName?`<div class="notice">使用アイテム：${esc(e.setName)}</div>`:''}</button></div>`).join(''):'<div class="notice">この日の出店はありません。</div>';
+  $('eventList').innerHTML=es.length?es.map(e=>`<div class="event"><button class="btn" onclick='openEvent(${JSON.stringify(e.outletName)})'><b>${esc(e.outletName)}</b>${e.setName?`<div class="notice">使用アイテム：${esc(e.setName)}</div>`:''}</button><button class="danger" onclick='deleteRegisterEvent(${JSON.stringify(e.saleDate)},${JSON.stringify(e.outletName)})'>レジ削除</button></div>`).join(''):'<div class="notice">この日の出店はありません。</div>';
 }
 function newEvent(){
   if(!$('saleDate').value)return alert('日付を選択してください。');
@@ -636,6 +708,7 @@ async function createEventWithSet(){
   if(!name)return alert('出店名を入力してください。');
   if(!set)return alert('アイテムを選択してください。');
   const ev={saleDate:date,outletName:name,setId:set.setId,setName:set.setName,eventId:'local-'+Date.now()};
+  unmarkEventDeleted(date,name);
   saveLocalEvent(ev);
   if(navigator.onLine){try{await postApi('createEvent',ev)}catch{queueMaster('createEvent',ev)}}else queueMaster('createEvent',ev);
   closeEventSetModal();showEvents();openEvent(name);
@@ -681,7 +754,7 @@ function openEvent(name){
   renderHistory();
   if(navigator.onLine)refreshHistoryOnline();
 }
-function backEvents(){currentEvent=null;cart={};$('register').classList.add('hidden');$('eventSelect').classList.remove('hidden');showEvents()}
+function backEvents(){editingSaleKey=null;editingSaleOriginal=null;editingPendingSale=false;currentEvent=null;cart={};$('editSaleBanner').classList.add('hidden');$('checkoutBtn').textContent='会計確定';$('register').classList.add('hidden');$('eventSelect').classList.remove('hidden');showEvents()}
 
 function activeSetItems(){
   if(!currentEvent)return [];
@@ -731,6 +804,7 @@ function addItem(id,mode,d){
 }
 function orderItems(){return Object.entries(cart).map(([id,v])=>({id,cashQty:v.cashQty||0,ticketQty:v.ticketQty||0})).filter(x=>x.cashQty||x.ticketQty)}
 function cashGross(){return orderItems().reduce((s,x)=>s+Number(product(x.id)?.price||0)*x.cashQty,0)}
+function grossTotal(){return orderItems().reduce((s,x)=>s+Number(product(x.id)?.price||0)*(Number(x.cashQty||0)+Number(x.ticketQty||0)),0)}
 function discount(){return Math.max(0,Number($('discount').value||0))}
 function customerPay(){return Math.max(0,cashGross()-Math.min(discount(),cashGross()))}
 function paypay(){return Math.min(Math.max(0,Number($('paypay').value||0)),customerPay())}
@@ -743,18 +817,132 @@ function exactCash(){$('received').value=cashNeed();renderCart()}
 function renderCart(){
   const its=orderItems();$('cartCard').classList.toggle('hidden',!its.length);
   $('cartRows').innerHTML=its.map(x=>{const p=product(x.id);return `<div class="row"><div><b>${esc(p.name)}</b><div class="notice">${yen(p.price)}</div></div><div><div class="qtyline"><span class="tag cash">チケット無</span><button onclick='addItem(${JSON.stringify(p.id)},"cash",-1)'>−</button><b>${x.cashQty}</b><button onclick='addItem(${JSON.stringify(p.id)},"cash",1)'>＋</button></div><div class="qtyline"><span class="tag ticket">チケット有</span><button onclick='addItem(${JSON.stringify(p.id)},"ticket",-1)'>−</button><b>${x.ticketQty}</b><button onclick='addItem(${JSON.stringify(p.id)},"ticket",1)'>＋</button></div></div></div>`}).join('');
-  $('customerPay').textContent=yen(customerPay());$('paypayView').textContent=yen(paypay());$('cashView').textContent=yen(cashNeed());$('change').textContent=yen(change());
+  $('grossTotal').textContent=yen(grossTotal());$('customerPay').textContent=yen(customerPay());$('paypayView').textContent=yen(paypay());$('cashView').textContent=yen(cashNeed());$('change').textContent=yen(change());
 }
 function setPrint(m){printMode=m;['pn','pr','pi'].forEach(x=>$(x).classList.remove('on'));$(m==='receipt'?'pr':m==='invoice'?'pi':'pn').classList.add('on');$('invoiceFields').classList.toggle('hidden',m!=='invoice')}
+
+
+function saleKey(s){return String(s.clientSaleId||s.saleId||'')}
+function removeLocalSaleByKey(key){
+  const h=localHistory(currentEvent).filter(s=>saleKey(s)!==String(key) && String(s.saleId||'')!==String(key));
+  saveHistory(currentEvent,h);
+}
+function pendingSaleByClient(clientId){
+  return pending().find(p=>String(p.clientSaleId||'')===String(clientId||''));
+}
+function replacePendingSale(clientId,payload){
+  const q=pending();
+  const i=q.findIndex(p=>String(p.clientSaleId||'')===String(clientId||''));
+  if(i>=0)q[i]=payload; else q.push(payload);
+  savePending(q);
+}
+function removePendingSale(clientId){
+  savePending(pending().filter(p=>String(p.clientSaleId||'')!==String(clientId||'')));
+}
+function normalizeSaleToCart(s){
+  const c={};
+  (s.items||[]).forEach(i=>{
+    const id=String(i.id||'');
+    if(!id)return;
+    if(!c[id])c[id]={cashQty:0,ticketQty:0};
+    const q=Number(i.qty||0);
+    if(i.cashQty!==undefined || i.ticketQty!==undefined){
+      c[id].cashQty+=Number(i.cashQty||0);
+      c[id].ticketQty+=Number(i.ticketQty||0);
+    }else if(String(i.paymentType||'')==='ticket'){
+      c[id].ticketQty+=q;
+    }else{
+      c[id].cashQty+=q;
+    }
+  });
+  return c;
+}
+function beginEditSale(key){
+  const s=findLocalSale(key);
+  if(!s)return alert('編集する履歴が見つかりません。');
+  const newCart=normalizeSaleToCart(s);
+  const ids=Object.keys(newCart);
+  if(!ids.length)return alert('この履歴は編集できる商品情報がありません。');
+  const missing=ids.filter(id=>!product(id)||!String(product(id).name||''));
+  if(missing.length)return alert('現在の商品設定にない商品が含まれるため、この履歴は編集できません。');
+
+  editingSaleKey=String(key);
+  editingSaleOriginal=s;
+  editingPendingSale=!!pendingSaleByClient(s.clientSaleId||s.saleId);
+
+  cart=newCart;
+  $('discount').value=Number(s.discountAmount||0);
+  $('paypay').value=Number(s.paypayAmount||0);
+  $('received').value=0;
+  $('editSaleBanner').classList.remove('hidden');
+  $('checkoutBtn').textContent='変更を保存';
+  renderCart();
+  $('received').value=cashNeed();
+  renderCart();
+  $('cartCard').scrollIntoView({behavior:'smooth',block:'start'});
+}
+function cancelSaleEdit(){
+  editingSaleKey=null;editingSaleOriginal=null;editingPendingSale=false;
+  cart={};
+  $('discount').value=0;$('paypay').value=0;$('received').value=0;
+  $('editSaleBanner').classList.add('hidden');
+  $('checkoutBtn').textContent='会計確定';
+  renderCart();
+}
+async function deleteHistorySale(key){
+  const s=findLocalSale(key);
+  if(!s)return alert('削除する履歴が見つかりません。');
+  if(!confirm(`この会計履歴を削除しますか？\n\n${(s.items||[]).map(i=>i.name+'×'+i.qty).join('、')}\n総売上 ${yen(s.total||0)}\n\n削除すると集計からも消えます。`))return;
+
+  const clientId=String(s.clientSaleId||'');
+  const isPending=!!pendingSaleByClient(clientId||s.saleId);
+
+  if(isPending){
+    removePendingSale(clientId||s.saleId);
+    removeLocalSaleByKey(key);
+    renderHistory();
+    return;
+  }
+
+  if(!navigator.onLine)return alert('同期済みの会計履歴を削除するにはオンライン接続が必要です。');
+
+  try{
+    await postApi('voidSale',{saleId:String(s.saleId||key),clientSaleId:clientId});
+    removeLocalSaleByKey(key);
+    renderHistory();
+    await new Promise(r=>setTimeout(r,700));
+    await refreshHistoryOnline();
+  }catch(err){
+    alert('削除できませんでした：'+(err.message||err));
+  }
+}
 
 async function checkout(){
   if(!currentEvent)return;
   const its=orderItems();if(!its.length)return;
   if(discount()>cashGross())return alert('割引額が大きすぎます。');
   if(cashNeed()>0&&received()<cashNeed())return alert('現金預りが不足しています。必要な現金：'+yen(cashNeed()));
-  if(!confirm('お客様支払 '+yen(customerPay())+'\nおつり '+yen(change())+'\n\n会計しますか？'))return;
 
-  const id='cs_'+Date.now()+'_'+Math.random().toString(36).slice(2,8);
+  if(editingSaleKey && !editingPendingSale && !navigator.onLine){
+    return alert('同期済みの会計履歴を編集するにはオンライン接続が必要です。');
+  }
+
+  const isEdit=!!editingSaleKey;
+  const wasPendingEdit=editingPendingSale;
+  if(!confirm(
+    (isEdit?'この会計履歴を変更しますか？':'会計しますか？')+
+    '\n\n総売上 '+yen(grossTotal())+
+    '\nお客様支払 '+yen(customerPay())+
+    '\nおつり '+yen(change())
+  ))return;
+
+  const oldKey=editingSaleKey;
+  const oldSale=editingSaleOriginal;
+  const oldClient=String(oldSale?.clientSaleId||oldSale?.saleId||'');
+  const id=isEdit
+    ? (editingPendingSale?oldClient:('edit_'+Date.now()+'_'+Math.random().toString(36).slice(2,8)))
+    : ('cs_'+Date.now()+'_'+Math.random().toString(36).slice(2,8));
+
   const sale={
     clientSaleId:id,saleId:id,timestamp:new Date().toISOString(),...currentEvent,
     items:its.map(x=>{const p=product(x.id),t=ticketFor(p);return {id:x.id,name:p.name,price:Number(p.price),cashQty:x.cashQty,ticketQty:x.ticketQty,qty:x.cashQty+x.ticketQty,taxRate:Number(p.taxRate||8),ticketName:t?.name||'',ticketValue:Number(t?.value||0)}}),
@@ -762,16 +950,44 @@ async function checkout(){
   };
   sale.total=sale.items.reduce((s,i)=>s+i.price*i.qty,0);
 
-  const h=localHistory(currentEvent);h.unshift(sale);saveHistory(currentEvent,h);renderHistory();
+  const payload={items:its,outletName:currentEvent.outletName,saleDate:currentEvent.saleDate,discountAmount:discount(),paypayAmount:paypay(),clientSaleId:id};
+
+  if(isEdit){
+    if(editingPendingSale){
+      replacePendingSale(oldClient,payload);
+      const h=localHistory(currentEvent).filter(x=>saleKey(x)!==String(oldKey) && String(x.saleId||'')!==String(oldKey));
+      h.unshift(sale);saveHistory(currentEvent,h);
+    }else{
+      try{
+        await postApi('replaceSale',{saleId:String(oldSale?.saleId||oldKey),clientSaleId:oldClient,payload});
+        const h=localHistory(currentEvent).filter(x=>saleKey(x)!==String(oldKey) && String(x.saleId||'')!==String(oldKey));
+        h.unshift(sale);saveHistory(currentEvent,h);
+      }catch(err){
+        return alert('変更できませんでした：'+(err.message||err));
+      }
+    }
+  }else{
+    const h=localHistory(currentEvent);h.unshift(sale);saveHistory(currentEvent,h);
+    const q=pending();q.push(payload);savePending(q);
+  }
+
+  renderHistory();
 
   if(printMode==='receipt')printText(receiptText(sale,false,'',''));
   if(printMode==='invoice')printText(receiptText(sale,true,$('invoiceTo').value,$('invoiceNote').value));
 
-  const payload={items:its,outletName:currentEvent.outletName,saleDate:currentEvent.saleDate,discountAmount:discount(),paypayAmount:paypay(),clientSaleId:id};
-  const q=pending();q.push(payload);savePending(q);
-
+  editingSaleKey=null;editingSaleOriginal=null;editingPendingSale=false;
+  $('editSaleBanner').classList.add('hidden');$('checkoutBtn').textContent='会計確定';
   cart={};$('discount').value=0;$('paypay').value=0;$('received').value=0;$('invoiceTo').value='';$('invoiceNote').value='お品代として';setPrint('none');renderCart();
-  if(navigator.onLine)syncPending();
+
+  if(navigator.onLine){
+    if(isEdit && !wasPendingEdit){
+      await new Promise(r=>setTimeout(r,700));
+      refreshHistoryOnline();
+    }else{
+      syncPending();
+    }
+  }
 }
 
 async function syncPending(){
@@ -820,9 +1036,9 @@ async function syncPending(){
 
 function renderHistory(){
   const h=localHistory(currentEvent);
-  $('history').innerHTML=h.length?`<table><tr><th>時刻</th><th>内容</th><th class="money">現金</th><th class="money">PayPay</th><th class="money">支払</th><th>印刷</th></tr>${h.slice(0,50).map(s=>`<tr><td>${new Date(s.timestamp).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})}</td><td>${esc((s.items||[]).map(i=>i.name+'×'+i.qty).join('、'))}</td><td class="money">${yen(s.cashAmount)}</td><td class="money">${yen(s.paypayAmount)}</td><td class="money">${yen(s.customerPaid!==undefined?s.customerPaid:Number(s.cashAmount||0)+Number(s.paypayAmount||0))}</td><td><button class="btn" onclick='openReprint(${JSON.stringify(s.saleId||s.clientSaleId)},"receipt")'>レシート</button> <button class="btn" onclick='openReprint(${JSON.stringify(s.saleId||s.clientSaleId)},"invoice")'>領収書</button></td></tr>`).join('')}</table>`:'まだ会計履歴がありません。';
+  $('history').innerHTML=h.length?`<table><tr><th>時刻</th><th>内容</th><th class="money">総売上</th><th class="money">割引</th><th class="money">現金</th><th class="money">PayPay</th><th>操作</th></tr>${h.slice(0,50).map(s=>{const k=saleKey(s);return `<tr><td>${new Date(s.timestamp).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})}</td><td>${esc((s.items||[]).map(i=>i.name+'×'+i.qty).join('、'))}</td><td class="money">${yen(s.total||0)}</td><td class="money">${yen(s.discountAmount||0)}</td><td class="money">${yen(s.cashAmount)}</td><td class="money">${yen(s.paypayAmount)}</td><td style="white-space:nowrap"><button class="btn" onclick='beginEditSale(${JSON.stringify(k)})'>編集</button> <button class="danger" onclick='deleteHistorySale(${JSON.stringify(k)})'>削除</button><br><button class="btn" style="margin-top:4px" onclick='openReprint(${JSON.stringify(k)},"receipt")'>レシート</button> <button class="btn" style="margin-top:4px" onclick='openReprint(${JSON.stringify(k)},"invoice")'>領収書</button></td></tr>`}).join('')}</table>`:'まだ会計履歴がありません。';
 }
-function findLocalSale(id){return localHistory(currentEvent).find(s=>String(s.saleId||s.clientSaleId)===String(id))}
+function findLocalSale(id){return localHistory(currentEvent).find(s=>String(s.saleId||'')===String(id)||String(s.clientSaleId||'')===String(id))}
 function openReprint(id,mode){
   reprintSale=findLocalSale(id);
   if(!reprintSale)return alert('履歴が見つかりません。');
