@@ -47,17 +47,15 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5.7.4 USB DIAG</span>
+  <span class="ver">PWA-5.7.3.2</span>
 </header>
 <main>
   <div class="card status">
-    <div><span id="netStatus">確認中</span>　未同期 <b id="pending">0</b>件<br><span id="usbStatus" class="notice">USB：未接続</span></div>
+    <div><span id="netStatus">確認中</span>　未同期 <b id="pending">0</b>件</div>
     <div class="actions">
       <button class="btn" onclick="openSummary()">集計</button>
       <button class="btn" onclick="openItemSetManager()">アイテム管理</button>
       <button class="btn" onclick="syncPending()">同期</button>
-      <button class="btn" onclick="usbPrinterConnect()">USB診断接続</button>
-      <button class="btn" onclick="usbPrinterTest()">USBテスト</button>
     </div>
   </div>
 
@@ -955,193 +953,6 @@ function printText(text){
 </style></head><body>${esc(text)}</body></html>`);d.close();
   setTimeout(()=>{f.contentWindow.focus();f.contentWindow.print();setTimeout(()=>f.remove(),1200)},80);
 }
-
-// ===== WebUSB 58mm ESC/POS テスト =====
-// Windowsで確認済み: VID 0x0FE6 / PID 0x811E
-let usbPrinterDevice = null;
-let usbPrinterInterface = null;
-let usbPrinterEndpoint = null;
-let usbPrinterAlternate = null;
-
-function usbSetStatus(msg){
-  const el=$('usbStatus');
-  if(el) el.textContent='USB：'+msg;
-}
-
-function usbHex(n){
-  return '0x'+Number(n||0).toString(16).toUpperCase().padStart(4,'0');
-}
-
-function usbDeviceInfo(d){
-  if(!d) return '';
-  return `${d.productName||'USB Printer'} / VID ${usbHex(d.vendorId)} / PID ${usbHex(d.productId)}`;
-}
-
-function usbConfigDump(d){
-  try{
-    const c=d.configuration;
-    if(!c) return 'configuration: なし';
-    const rows=[];
-    (c.interfaces||[]).forEach(intf=>{
-      (intf.alternates||[]).forEach(alt=>{
-        const eps=(alt.endpoints||[]).map(ep=>`${ep.direction}:${ep.type}:EP${ep.endpointNumber}`).join(',');
-        rows.push(`IF${intf.interfaceNumber}/ALT${alt.alternateSetting}/CLASS${alt.interfaceClass} [${eps}]`);
-      });
-    });
-    return rows.join('\n') || 'endpoint情報なし';
-  }catch(e){
-    return '構成情報取得失敗';
-  }
-}
-
-async function usbPrepareDevice(device){
-  if(!device.opened) await device.open();
-
-  if(!device.configuration){
-    const configs=device.configurations||[];
-    const configValue=(configs[0]&&configs[0].configurationValue)||1;
-    await device.selectConfiguration(configValue);
-  }
-
-  let candidate=null;
-  for(const intf of (device.configuration?.interfaces||[])){
-    for(const alt of (intf.alternates||[])){
-      const outEp=(alt.endpoints||[]).find(ep=>ep.direction==='out' && (ep.type==='bulk'||ep.type==='interrupt'));
-      if(outEp){
-        // プリンタークラス(7)を優先。なければ最初のOUT endpointを使う。
-        const score=(alt.interfaceClass===7?100:0)+(outEp.type==='bulk'?10:0);
-        if(!candidate || score>candidate.score){
-          candidate={
-            score,
-            interfaceNumber:intf.interfaceNumber,
-            alternateSetting:alt.alternateSetting,
-            endpointNumber:outEp.endpointNumber,
-            interfaceClass:alt.interfaceClass,
-            endpointType:outEp.type
-          };
-        }
-      }
-    }
-  }
-
-  if(!candidate){
-    throw new Error('印刷用のOUT endpointが見つかりません。\n'+usbConfigDump(device));
-  }
-
-  try{
-    await device.claimInterface(candidate.interfaceNumber);
-  }catch(e){
-    // すでにclaim済み等もあるため、後続処理を試す余地を残す
-    if(!String(e&&e.message||e).toLowerCase().includes('already')){
-      throw new Error('USB通信口を開けませんでした: '+(e.message||e)+'\n'+usbConfigDump(device));
-    }
-  }
-
-  if(candidate.alternateSetting!==0){
-    try{
-      await device.selectAlternateInterface(candidate.interfaceNumber,candidate.alternateSetting);
-    }catch(e){}
-  }
-
-  usbPrinterDevice=device;
-  usbPrinterInterface=candidate.interfaceNumber;
-  usbPrinterEndpoint=candidate.endpointNumber;
-  usbPrinterAlternate=candidate.alternateSetting;
-
-  usbSetStatus(`接続済み ${usbDeviceInfo(device)} / IF${usbPrinterInterface} EP${usbPrinterEndpoint}`);
-  return candidate;
-}
-
-async function usbPrinterConnect(){
-  if(!('usb' in navigator)){
-    alert('このブラウザではWebUSBが使えません。ChromeでGitHub Pages（https://）を開いてください。');
-    usbSetStatus('WebUSB非対応');
-    return;
-  }
-
-  try{
-    usbSetStatus('機器選択待ち');
-    // ユーザー操作から直接 requestDevice を呼ぶ必要があります。
-    const device=await navigator.usb.requestDevice({
-      // 診断版：VID/PIDで絞らず、ChromeがWebUSBへ公開しているUSB機器を全部候補表示
-      filters:[]
-    });
-    await usbPrepareDevice(device);
-    alert('USB機器を選択できました。\n'+usbDeviceInfo(device)+'\n\nこのVID/PIDを控えてください。\n続けて「USBテスト」を押してください。');
-  }catch(e){
-    usbSetStatus('未接続');
-    if(e && e.name==='NotFoundError'){
-      alert('ChromeがWebUSBで選べるUSB機器を表示できませんでした。\nプリンターの電源・USB-Cケーブルを確認し、それでも同じならChromeOSがこのプリンターをWebUSBへ公開していない可能性があります。');
-    }else{
-      alert('USB接続に失敗しました。\n'+(e.message||e));
-    }
-  }
-}
-
-async function usbTryReconnect(){
-  if(!('usb' in navigator)) return;
-  try{
-    const devices=await navigator.usb.getDevices();
-    const device=devices.find(d=>d.vendorId===0x0FE6 && d.productId===0x811E)
-      || devices.find(d=>d.vendorId===0x0FE6);
-    if(device) await usbPrepareDevice(device);
-  }catch(e){}
-}
-
-async function usbPrinterTest(){
-  if(!('usb' in navigator)){
-    alert('WebUSB非対応です。');
-    return;
-  }
-
-  try{
-    if(!usbPrinterDevice || !usbPrinterDevice.opened || !usbPrinterEndpoint){
-      await usbTryReconnect();
-    }
-    if(!usbPrinterDevice || !usbPrinterDevice.opened || !usbPrinterEndpoint){
-      alert('先に「USB接続」を押してプリンターを選択してください。');
-      return;
-    }
-
-    // 日本語フォント依存を避けるため、最初の疎通テストはASCIIのみ。
-    const enc=new TextEncoder();
-    const body=enc.encode(
-      '*** USB TEST OK ***\n'+
-      'Kitchen Car POS\n'+
-      'VID 0FE6 PID 811E\n'+
-      'WebUSB / ESC-POS\n\n\n\n'
-    );
-    const bytes=new Uint8Array(2+body.length);
-    bytes[0]=0x1B; bytes[1]=0x40; // ESC @ 初期化
-    bytes.set(body,2);
-
-    const result=await usbPrinterDevice.transferOut(usbPrinterEndpoint,bytes);
-    if(result.status==='ok'){
-      usbSetStatus(`テスト送信成功 ${usbDeviceInfo(usbPrinterDevice)}`);
-      alert('USBテストデータを送信しました。\nプリンターから「USB TEST OK」と出れば成功です。');
-    }else{
-      throw new Error('transferOut status: '+result.status);
-    }
-  }catch(e){
-    usbSetStatus('通信エラー');
-    alert('USBテスト印刷に失敗しました。\n'+(e.message||e)+'\n\n'+(usbPrinterDevice?usbConfigDump(usbPrinterDevice):''));
-  }
-}
-
-if('usb' in navigator){
-  navigator.usb.addEventListener('disconnect',ev=>{
-    if(usbPrinterDevice && ev.device===usbPrinterDevice){
-      usbPrinterDevice=null;
-      usbPrinterInterface=null;
-      usbPrinterEndpoint=null;
-      usbSetStatus('切断');
-    }
-  });
-  // 一度許可済みならページ再読込後も自動再接続を試す。
-  setTimeout(()=>usbTryReconnect(),800);
-}
-// ===== WebUSB テストここまで =====
-
 init();
 </script>
 </body>
