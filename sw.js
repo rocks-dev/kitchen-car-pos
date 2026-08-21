@@ -1,4 +1,4 @@
-const CACHE='kitchen-car-pos-pwa-v5-7-3-3-sortfix';
+const CACHE='kitchen-car-pos-pwa-v5-7-4-webusb-test';
 const ASSETS=['./','./index.html','./manifest.json','./icon-192.png','./icon-512.png'];
 
 self.addEventListener('install',e=>{
