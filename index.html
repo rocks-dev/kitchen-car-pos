@@ -47,7 +47,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5.7.4 USB TEST</span>
+  <span class="ver">PWA-5.7.4 USB DIAG</span>
 </header>
 <main>
   <div class="card status">
@@ -56,7 +56,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
       <button class="btn" onclick="openSummary()">集計</button>
       <button class="btn" onclick="openItemSetManager()">アイテム管理</button>
       <button class="btn" onclick="syncPending()">同期</button>
-      <button class="btn" onclick="usbPrinterConnect()">USB接続</button>
+      <button class="btn" onclick="usbPrinterConnect()">USB診断接続</button>
       <button class="btn" onclick="usbPrinterTest()">USBテスト</button>
     </div>
   </div>
@@ -1063,17 +1063,15 @@ async function usbPrinterConnect(){
     usbSetStatus('機器選択待ち');
     // ユーザー操作から直接 requestDevice を呼ぶ必要があります。
     const device=await navigator.usb.requestDevice({
-      filters:[
-        {vendorId:0x0FE6,productId:0x811E},
-        {vendorId:0x0FE6}
-      ]
+      // 診断版：VID/PIDで絞らず、ChromeがWebUSBへ公開しているUSB機器を全部候補表示
+      filters:[]
     });
     await usbPrepareDevice(device);
-    alert('USBプリンターを開きました。\n'+usbDeviceInfo(device)+'\n続けて「USBテスト」を押してください。');
+    alert('USB機器を選択できました。\n'+usbDeviceInfo(device)+'\n\nこのVID/PIDを控えてください。\n続けて「USBテスト」を押してください。');
   }catch(e){
     usbSetStatus('未接続');
     if(e && e.name==='NotFoundError'){
-      alert('USB機器が選択されませんでした。\nプリンターの電源とUSB-Cケーブルを確認して、もう一度「USB接続」を押してください。');
+      alert('ChromeがWebUSBで選べるUSB機器を表示できませんでした。\nプリンターの電源・USB-Cケーブルを確認し、それでも同じならChromeOSがこのプリンターをWebUSBへ公開していない可能性があります。');
     }else{
       alert('USB接続に失敗しました。\n'+(e.message||e));
     }
