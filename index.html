@@ -47,11 +47,11 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5.9.0</span>
+  <span class="ver">PWA-5.10.0</span>
 </header>
 <main>
   <div class="card status">
-    <div><span id="netStatus">確認中</span>　未同期 <b id="pending">0</b>件</div>
+    <div><span id="netStatus">確認中</span>　未同期 <b id="pending">0</b>件 <span id="syncStatus" class="notice"></span></div>
     <div class="actions">
       <button class="btn" onclick="openSummary()">集計</button>
       <button class="btn" onclick="openItemSetManager()">アイテム管理</button>
@@ -282,6 +282,7 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&
 let data={products:[],tickets:[],settings:{},events:[],itemSets:[]},cart={},currentEvent=null,printMode='none';
 let selectedSummary=null,selectedSummaryEvent=null,reprintSale=null,reprintInvoice=false;
 let editingSaleKey=null,editingSaleOriginal=null,editingPendingSale=false;
+let syncInProgress=false;
 
 function today(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
 function gasUrl(){return localStorage.getItem('pwa_gas_url')||''}
@@ -361,6 +362,12 @@ async function init(){
   if('serviceWorker' in navigator){
     try{await navigator.serviceWorker.register('./sw.js')}catch(e){console.warn(e)}
   }
+
+  // ページを開いた時点ですでにオンラインでも、未同期があれば自動再開。
+  // これで同期途中の再読込・PWA更新後も残りを自動送信する。
+  if(navigator.onLine && gasUrl() && (pending().length || pendingMaster().length)){
+    setTimeout(()=>syncPending(),500);
+  }
 }
 
 async function saveGasUrl(){
@@ -411,7 +418,7 @@ function localGroupSummaries(){
   });return Object.values(m);
 }
 function renderSummaryGroups(groups){
-  $('summaryGroups').innerHTML=groups.length?`<table class="summaryTable"><tr><th>日付</th><th>出店</th><th class="money">総売上</th><th class="money">現金</th><th class="money">PayPay</th><th class="money">チケット額</th><th class="money">差額</th></tr>${groups.map(g=>`<tr style="cursor:pointer" onclick='selectSummary(${JSON.stringify(g.saleDate)},${JSON.stringify(g.outletName)})'><td>${esc(g.saleDate)}</td><td>${esc(g.outletName)}</td><td class="money">${yen(g.grossSales)}</td><td class="money">${yen(g.cashSales)}</td><td class="money">${yen(g.paypaySales||0)}</td><td class="money">${yen(g.ticketFace)}</td><td class="money">${yen(g.ticketDiff)}</td></tr>`).join('')}</table>`:'<div class="notice">データなし</div>';
+  $('summaryGroups').innerHTML=groups.length?`<table class="summaryTable"><tr><th>日付</th><th>出店</th><th class="money">総売上</th><th class="money">現金</th><th class="money">PayPay</th><th class="money">チケット額</th><th class="money">差額</th><th>操作</th></tr>${groups.map(g=>`<tr style="cursor:pointer" onclick='selectSummary(${JSON.stringify(g.saleDate)},${JSON.stringify(g.outletName)})'><td>${esc(g.saleDate)}</td><td>${esc(g.outletName)}</td><td class="money">${yen(g.grossSales)}</td><td class="money">${yen(g.cashSales)}</td><td class="money">${yen(g.paypaySales||0)}</td><td class="money">${yen(g.ticketFace)}</td><td class="money">${yen(g.ticketDiff)}</td><td><button class="danger" onclick='event.stopPropagation();deleteSummaryGroup(${JSON.stringify(g.saleDate)},${JSON.stringify(g.outletName)})'>削除</button></td></tr>`).join('')}</table>`:'<div class="notice">データなし</div>';
 }
 async function selectSummary(date,name){
   selectedSummaryEvent={saleDate:date,outletName:name};
@@ -436,6 +443,30 @@ function purgeLocalSalesForEvent(date,name){
   const q=pending().filter(p=>!(String(p.saleDate||'')===String(date)&&String(p.outletName||'')===String(name)));
   savePending(q);
 }
+async function deleteSummaryGroup(date,name){
+  if(!navigator.onLine)return alert('集計データの削除はオンライン時に行ってください。');
+  if(!confirm(`「${date} ${name}」を集計一覧から削除しますか？\n\nこの出店の会計履歴・総売上・商品別・チケット別集計が削除されます。\n出店レジ枠そのものは残ります。`))return;
+  try{
+    await postApi('voidEventSales',{saleDate:date,outletName:name});
+    purgeLocalSalesForEvent(date,name);
+
+    if(selectedSummaryEvent &&
+       String(selectedSummaryEvent.saleDate)===String(date) &&
+       String(selectedSummaryEvent.outletName)===String(name)){
+      selectedSummary=null;
+      selectedSummaryEvent=null;
+      $('summaryDetail').classList.add('hidden');
+    }
+
+    await new Promise(r=>setTimeout(r,700));
+    const g=await jsonp('groups');
+    renderSummaryGroups(g||[]);
+    alert('集計から削除しました。');
+  }catch(err){
+    alert('削除できませんでした：'+(err.message||err));
+  }
+}
+
 async function deleteSummaryData(){
   if(!selectedSummaryEvent)return;
   if(!navigator.onLine)return alert('集計データの削除はオンライン時に行ってください。');
@@ -992,51 +1023,115 @@ async function checkout(){
 
 async function syncPending(){
   updateNet();
-  if(!navigator.onLine)return;
+  if(!navigator.onLine || !gasUrl())return;
+  if(syncInProgress)return;
 
-  // 商品・チケット変更を先に同期
-  let mq=pendingMaster(), mremain=[];
-  for(const m of mq){
-    try{
-      await postApi(m.action,m.payload);
-    }catch{
-      mremain.push(m);
+  syncInProgress=true;
+  const status=$('syncStatus');
+  try{
+    if(status)status.textContent=' 同期中…';
+
+    // 商品・チケット・アイテム群などの変更を先に同期。
+    // 1件成功するたびに端末側キューから確実に外す。
+    let masterQueue=pendingMaster();
+    const masterRemain=[];
+    for(let i=0;i<masterQueue.length;i++){
+      const m=masterQueue[i];
+      if(!navigator.onLine){
+        masterRemain.push(...masterQueue.slice(i));
+        break;
+      }
+      try{
+        await postApi(m.action,m.payload);
+      }catch{
+        masterRemain.push(m);
+      }
+      if(status)status.textContent=` 設定同期 ${i+1}/${masterQueue.length}`;
     }
-  }
-  savePendingMaster(mremain);
+    savePendingMaster(masterRemain);
 
-  // 売上を同期
-  let q=pending(),remain=[];
-  for(const p of q){
-    try{
-      await postApi('recordSale',p);
-      await new Promise(r=>setTimeout(r,500));
-      const chk=await jsonp('hasSale',{clientSaleId:p.clientSaleId});
-      if(!chk.found)remain.push(p);
-    }catch{remain.push(p)}
-  }
-  savePending(remain);
+    // 売上は10会計ずつGASへまとめて送る。
+    // 旧バージョンで残った pwa_pending もそのまま対象になる。
+    const all=pending();
+    const total=all.length;
+    const unresolved=[];
+    const BATCH_SIZE=10;
 
-  // 同期後にサーバーの最新マスタを端末へ再取得
-  if(!mremain.length){
-    try{
-      const b=await jsonp('bootstrap');
-      data.products=b.products||data.products;
-      data.tickets=b.tickets||data.tickets;
-      data.settings=b.settings||data.settings;
-      data.events=b.events||data.events;data.itemSets=b.itemSets||data.itemSets;
-      cacheMaster();
-      if(!$('manager').classList.contains('hidden'))renderManager();
-      if(!$('register').classList.contains('hidden'))renderProducts();
-    }catch{}
-  }
+    for(let start=0; start<all.length; start+=BATCH_SIZE){
+      const batch=all.slice(start,start+BATCH_SIZE);
 
-  if(currentEvent)refreshHistoryOnline();
+      if(!navigator.onLine){
+        unresolved.push(...all.slice(start));
+        break;
+      }
+
+      try{
+        await postApi('recordSalesBatch',{sales:batch});
+
+        // GAS側で実際に保存されたclientSaleIdを一括確認。
+        const ids=batch.map(x=>String(x.clientSaleId||'')).filter(Boolean);
+        const chk=ids.length
+          ? await jsonp('hasSalesBatch',{ids:ids.join(',')})
+          : {found:[]};
+
+        const found=new Set((chk&&chk.found)||[]);
+        batch.forEach(p=>{
+          const id=String(p.clientSaleId||'');
+          if(!id || !found.has(id))unresolved.push(p);
+        });
+      }catch{
+        // このバッチだけ残して次のバッチへ進む。
+        // 1件の失敗で後続全部が同期停止しない。
+        unresolved.push(...batch);
+      }
+
+      // 途中で画面更新されても、ここまで成功した分は復活しないよう
+      // 「失敗済み + まだ未処理」を毎バッチ保存する。
+      const unprocessed=all.slice(start+batch.length);
+      savePending([...unresolved,...unprocessed]);
+
+      const done=Math.min(start+batch.length,total);
+      if(status)status.textContent=` 売上同期 ${done}/${total}`;
+      await new Promise(r=>setTimeout(r,120));
+    }
+
+    savePending(unresolved);
+
+    // 同期後にサーバーの最新マスタを端末へ再取得
+    if(!masterRemain.length){
+      try{
+        const b=await jsonp('bootstrap');
+        data.products=b.products||data.products;
+        data.tickets=b.tickets||data.tickets;
+        data.settings=b.settings||data.settings;
+        data.events=b.events||data.events;
+        data.itemSets=b.itemSets||data.itemSets;
+        cacheMaster();
+        if(!$('manager').classList.contains('hidden'))renderManager();
+        if(!$('register').classList.contains('hidden'))renderProducts();
+      }catch{}
+    }
+
+    if(currentEvent)await refreshHistoryOnline();
+
+    if(status){
+      const left=pending().length+pendingMaster().length;
+      status.textContent=left?` 残り${left}件`:' 同期完了';
+      setTimeout(()=>{if($('syncStatus'))$('syncStatus').textContent=''},3000);
+    }
+  }finally{
+    syncInProgress=false;
+    updatePendingTotal();
+  }
 }
 
 function renderHistory(){
   const h=localHistory(currentEvent);
-  $('history').innerHTML=h.length?`<table><tr><th>時刻</th><th>内容</th><th class="money">総売上</th><th class="money">割引</th><th class="money">現金</th><th class="money">PayPay</th><th>操作</th></tr>${h.slice(0,50).map(s=>{const k=saleKey(s);return `<tr><td>${new Date(s.timestamp).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})}</td><td>${esc((s.items||[]).map(i=>i.name+'×'+i.qty).join('、'))}</td><td class="money">${yen(s.total||0)}</td><td class="money">${yen(s.discountAmount||0)}</td><td class="money">${yen(s.cashAmount)}</td><td class="money">${yen(s.paypayAmount)}</td><td style="white-space:nowrap"><button class="btn" onclick='beginEditSale(${JSON.stringify(k)})'>編集</button> <button class="danger" onclick='deleteHistorySale(${JSON.stringify(k)})'>削除</button><br><button class="btn" style="margin-top:4px" onclick='openReprint(${JSON.stringify(k)},"receipt")'>レシート</button> <button class="btn" style="margin-top:4px" onclick='openReprint(${JSON.stringify(k)},"invoice")'>領収書</button></td></tr>`}).join('')}</table>`:'まだ会計履歴がありません。';
+  $('history').innerHTML=h.length
+    ? `<div class="notice" style="margin:8px 0">端末内会計履歴：<b>${h.length}件</b>（全件表示）</div>
+       <table><tr><th>時刻</th><th>内容</th><th class="money">総売上</th><th class="money">割引</th><th class="money">現金</th><th class="money">PayPay</th><th>操作</th></tr>
+       ${h.map(s=>{const k=saleKey(s);return `<tr><td>${new Date(s.timestamp).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})}</td><td>${esc((s.items||[]).map(i=>i.name+'×'+i.qty).join('、'))}</td><td class="money">${yen(s.total||0)}</td><td class="money">${yen(s.discountAmount||0)}</td><td class="money">${yen(s.cashAmount)}</td><td class="money">${yen(s.paypayAmount)}</td><td style="white-space:nowrap"><button class="btn" onclick='beginEditSale(${JSON.stringify(k)})'>編集</button> <button class="danger" onclick='deleteHistorySale(${JSON.stringify(k)})'>削除</button><br><button class="btn" style="margin-top:4px" onclick='openReprint(${JSON.stringify(k)},"receipt")'>レシート</button> <button class="btn" style="margin-top:4px" onclick='openReprint(${JSON.stringify(k)},"invoice")'>領収書</button></td></tr>`}).join('')}</table>`
+    : 'まだ会計履歴がありません。';
 }
 function findLocalSale(id){return localHistory(currentEvent).find(s=>String(s.saleId||'')===String(id)||String(s.clientSaleId||'')===String(id))}
 function openReprint(id,mode){
