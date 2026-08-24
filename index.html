@@ -47,7 +47,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5.12.0</span>
+  <span class="ver">PWA-5.13.0</span>
 </header>
 <main>
   <div class="card status">
@@ -1046,7 +1046,27 @@ async function checkout(){
   };
   sale.total=sale.items.reduce((s,i)=>s+i.price*i.qty,0);
 
-  const payload={items:its,outletName:currentEvent.outletName,saleDate:currentEvent.saleDate,discountAmount:discount(),paypayAmount:paypay(),clientSaleId:id};
+  const payload={
+    items:its.map(x=>{
+      const p=product(x.id)||{},t=ticketFor(p)||{};
+      return {
+        id:String(x.id||''),
+        cashQty:Number(x.cashQty||0),
+        ticketQty:Number(x.ticketQty||0),
+        name:String(p.name||''),
+        price:Number(p.price||0),
+        taxRate:Number(p.taxRate||8),
+        ticketId:String(p.ticketId||''),
+        ticketName:String(t.name||''),
+        ticketValue:Number(t.value||0)
+      };
+    }),
+    outletName:currentEvent.outletName,
+    saleDate:currentEvent.saleDate,
+    discountAmount:discount(),
+    paypayAmount:paypay(),
+    clientSaleId:id
+  };
 
   if(isEdit){
     if(editingPendingSale){
@@ -1089,6 +1109,63 @@ async function checkout(){
 function pendingSaleKey(p){
   return String((p&&p.clientSaleId)||'') || [normalizeLocalDate(p&&p.saleDate),String((p&&p.outletName)||''),JSON.stringify((p&&p.items)||[])].join('|');
 }
+
+function findLocalSaleByClientId(clientId){
+  const key=String(clientId||'');
+  if(!key)return null;
+  const sales=localAllSales();
+  return sales.find(s=>String(s.clientSaleId||s.saleId||'')===key)||null;
+}
+
+function enrichPendingSale(p){
+  const base={...p,saleDate:normalizeLocalDate(p&&p.saleDate),outletName:String((p&&p.outletName)||'').trim()};
+  const local=findLocalSaleByClientId(base.clientSaleId);
+  if(!local || !Array.isArray(local.items) || !local.items.length)return base;
+
+  // 旧バージョンの未同期キューは id/数量 しか持っていない。
+  // 端末内会計履歴に残っている「会計時点の商品名・価格・税率・チケット情報」を
+  // 付け直してから同期する。これで現在の商品マスターが変更/削除されていても救出できる。
+  const itemMap={};
+  local.items.forEach(i=>{
+    const id=String(i.id||'');
+    if(!id)return;
+    if(!itemMap[id])itemMap[id]={
+      id:id,
+      name:String(i.name||''),
+      price:Number(i.price||0),
+      taxRate:Number(i.taxRate||8),
+      ticketId:String(i.ticketId||''),
+      ticketName:String(i.ticketName||''),
+      ticketValue:Number(i.ticketValue||0),
+      cashQty:0,
+      ticketQty:0
+    };
+    const q=Number(i.qty||0);
+    if(i.cashQty!==undefined || i.ticketQty!==undefined){
+      itemMap[id].cashQty+=Number(i.cashQty||0);
+      itemMap[id].ticketQty+=Number(i.ticketQty||0);
+    }else if(String(i.paymentType||'')==='ticket'){
+      itemMap[id].ticketQty+=q;
+    }else{
+      itemMap[id].cashQty+=q;
+    }
+  });
+
+  base.items=(base.items||[]).map(x=>{
+    const snap=itemMap[String(x.id||'')]||{};
+    return {
+      ...x,
+      name:String(snap.name||x.name||''),
+      price:(snap.price!==undefined?Number(snap.price):Number(x.price||0)),
+      taxRate:Number(snap.taxRate||x.taxRate||8),
+      ticketId:String(snap.ticketId||x.ticketId||''),
+      ticketName:String(snap.ticketName||x.ticketName||''),
+      ticketValue:Number(snap.ticketValue||x.ticketValue||0)
+    };
+  });
+  return base;
+}
+
 function removeConfirmedPending(ids){
   const done=new Set((ids||[]).map(String));
   if(!done.size)return;
@@ -1130,8 +1207,8 @@ async function waitBatchSaved(batch,maxAttempts=8){
 }
 async function assertSyncBackend(){
   const info=await jsonp('syncInfo');
-  if(!info || info.batchSync!==true || String(info.version||'')!=='PWA-5.12.0'){
-    throw new Error('GASがPWA-5.12.0になっていません。先にCode.gsを更新して再デプロイしてください。');
+  if(!info || info.batchSync!==true || info.snapshotSync!==true || String(info.version||'')!=='PWA-5.13.0'){
+    throw new Error('GASがPWA-5.13.0になっていません。先にCode.gsを更新して再デプロイしてください。');
   }
   return info;
 }
@@ -1171,7 +1248,7 @@ async function syncPending(manual=false){
     savePendingMaster(masterRemain);
 
     // 開始時点の未同期だけを1回処理。自動で同じ79件を2周目には送らない。
-    const snapshot=pending().map(p=>({...p,saleDate:normalizeLocalDate(p.saleDate),outletName:String(p.outletName||'').trim()}));
+    const snapshot=pending().map(enrichPendingSale);
     const total=snapshot.length;
     const BATCH_SIZE=10;
     let processed=0,confirmedTotal=0;
@@ -1222,7 +1299,7 @@ async function syncPending(manual=false){
       // 1周して残ったら自動再送しない。同期ボタンを押した時だけ再試行。
       syncAutoBlocked=true;
       sessionStorage.setItem('pwa_sync_auto_blocked','1');
-      if(status)status.textContent=` 同期停止・残り${left}件（同期ボタンで再試行）`;
+      if(status)status.textContent=` 同期停止・残り${left}件（データは端末に保存済み）`;
     }
   }catch(err){
     syncAutoBlocked=true;
