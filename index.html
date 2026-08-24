@@ -47,7 +47,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5.11.0</span>
+  <span class="ver">PWA-5.12.0</span>
 </header>
 <main>
   <div class="card status">
@@ -55,7 +55,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
     <div class="actions">
       <button class="btn" onclick="openSummary()">集計</button>
       <button class="btn" onclick="openItemSetManager()">アイテム管理</button>
-      <button class="btn" onclick="syncPending()">同期</button>
+      <button class="btn" onclick="syncPending(true)">同期</button>
     </div>
   </div>
 
@@ -283,6 +283,7 @@ let data={products:[],tickets:[],settings:{},events:[],itemSets:[]},cart={},curr
 let selectedSummary=null,selectedSummaryEvent=null,reprintSale=null,reprintInvoice=false;
 let editingSaleKey=null,editingSaleOriginal=null,editingPendingSale=false;
 let syncInProgress=false;
+let syncAutoBlocked=sessionStorage.getItem('pwa_sync_auto_blocked')==='1';
 
 function today(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
 function normalizeLocalDate(v){
@@ -305,18 +306,47 @@ function normalizeLocalSale(s){
   return {...s,saleDate:normalizeLocalDate(s&&s.saleDate),outletName:String((s&&s.outletName)||'').trim()};
 }
 function repairLocalSaleData(){
-  // 旧GASから戻った "Sat Aug 22 2026..." のような日付を yyyy-MM-dd に統一。
+  // 旧版の履歴キー/中身を yyyy-MM-dd に統一し、同じ出店を1つへまとめる。
+  const buckets={};
+  const oldKeys=[];
   for(let i=0;i<localStorage.length;i++){
     const k=localStorage.key(i);
     if(!k || !k.startsWith('pwa_history_'))continue;
+    oldKeys.push(k);
     try{
       const a=JSON.parse(localStorage.getItem(k)||'[]');
-      localStorage.setItem(k,JSON.stringify((a||[]).map(normalizeLocalSale)));
+      (a||[]).forEach(raw=>{
+        const s=normalizeLocalSale(raw);
+        if(!s.saleDate || !s.outletName)return;
+        const nk='pwa_history_'+s.saleDate+'_'+s.outletName;
+        if(!buckets[nk])buckets[nk]=[];
+        buckets[nk].push(s);
+      });
     }catch{}
   }
+  // saleId/clientSaleIdで重複排除してから、旧キーを新キーへ移行。
+  Object.entries(buckets).forEach(([k,a])=>{
+    const seen=new Set(),merged=[];
+    a.sort((x,y)=>String(y.timestamp||'').localeCompare(String(x.timestamp||'')));
+    a.forEach(s=>{
+      const sk=String(s.clientSaleId||s.saleId||'') || [s.timestamp,s.outletName,JSON.stringify(s.items||[])].join('|');
+      if(seen.has(sk))return;
+      seen.add(sk);merged.push(s);
+    });
+    localStorage.setItem(k,JSON.stringify(merged));
+  });
+  oldKeys.forEach(k=>{if(!buckets[k])localStorage.removeItem(k)});
+
   try{
     const q=JSON.parse(localStorage.getItem('pwa_pending')||'[]');
-    localStorage.setItem('pwa_pending',JSON.stringify((q||[]).map(p=>({...p,saleDate:normalizeLocalDate(p.saleDate),outletName:String(p.outletName||'').trim()}))));
+    const fixed=(q||[]).map((p,i)=>({
+      ...p,
+      saleDate:normalizeLocalDate(p.saleDate),
+      outletName:String(p.outletName||'').trim(),
+      // clientSaleIdが無い古い未同期データにも一意IDを付与して確認可能にする。
+      clientSaleId:String(p.clientSaleId||'') || ('legacy_'+Date.now()+'_'+i+'_'+Math.random().toString(36).slice(2,8))
+    }));
+    localStorage.setItem('pwa_pending',JSON.stringify(fixed));
   }catch{}
 }
 function gasUrl(){return localStorage.getItem('pwa_gas_url')||''}
@@ -355,7 +385,7 @@ function updateNet(){
   $('netStatus').textContent=on?'オンライン':'オフライン';
   $('netStatus').className=on?'online':'offline';
 }
-window.addEventListener('online',()=>{updateNet();syncPending();});
+window.addEventListener('online',()=>{updateNet();syncPending(false);});
 window.addEventListener('offline',updateNet);
 
 function jsonp(api,params={}){
@@ -401,7 +431,7 @@ async function init(){
   // ページを開いた時点ですでにオンラインでも、未同期があれば自動再開。
   // これで同期途中の再読込・PWA更新後も残りを自動送信する。
   if(navigator.onLine && gasUrl() && (pending().length || pendingMaster().length)){
-    setTimeout(()=>syncPending(),500);
+    setTimeout(()=>syncPending(false),500);
   }
 }
 
@@ -652,14 +682,14 @@ function saveManagerProduct(){
   if(i>=0)data.products[i]=p;else data.products.push(p);
   data.products.sort((a,b)=>Number(a.sort||0)-Number(b.sort||0));
   cacheMaster();queueMaster('saveProductOffline',p);clearManagerProduct();renderManager();
-  if(navigator.onLine)syncPending();
+  if(navigator.onLine)syncPending(false);
 }
 function deleteManagerProduct(id){
   const p=data.products.find(x=>String(x.id)===String(id));if(!p)return;
   if(!confirm(`商品「${p.name}」を削除しますか？`))return;
   data.products=data.products.filter(x=>String(x.id)!==String(id));
   cacheMaster();queueMaster('deleteProductOffline',{id});renderManager();
-  if(navigator.onLine)syncPending();
+  if(navigator.onLine)syncPending(false);
 }
 function clearManagerTicket(){$('mTicketId').value='';$('mTicketName').value='';$('mTicketValue').value=''}
 function editManagerTicket(id){
@@ -673,7 +703,7 @@ function saveManagerTicket(){
   const i=data.tickets.findIndex(x=>String(x.id)===String(id));
   if(i>=0)data.tickets[i]=t;else data.tickets.push(t);
   cacheMaster();queueMaster('saveTicketOffline',t);clearManagerTicket();renderManager();
-  if(navigator.onLine)syncPending();
+  if(navigator.onLine)syncPending(false);
 }
 function deleteManagerTicket(id){
   const t=data.tickets.find(x=>String(x.id)===String(id));if(!t)return;
@@ -681,7 +711,7 @@ function deleteManagerTicket(id){
   data.tickets=data.tickets.filter(x=>String(x.id)!==String(id));
   data.products=(data.products||[]).map(p=>String(p.ticketId)===String(id)?{...p,ticketId:''}:p);
   cacheMaster();queueMaster('deleteTicketOffline',{id});renderManager();
-  if(navigator.onLine)syncPending();
+  if(navigator.onLine)syncPending(false);
 }
 
 async function refreshMaster(showAlert=true){
@@ -1051,7 +1081,7 @@ async function checkout(){
       await new Promise(r=>setTimeout(r,700));
       refreshHistoryOnline();
     }else{
-      syncPending();
+      syncPending(false);
     }
   }
 }
@@ -1062,82 +1092,111 @@ function pendingSaleKey(p){
 function removeConfirmedPending(ids){
   const done=new Set((ids||[]).map(String));
   if(!done.size)return;
-  // 現在のキューから成功分だけを除く。
-  // 同期中に新しい会計が追加されても、それを上書きして消さない。
   savePending(pending().filter(p=>!done.has(String((p&&p.clientSaleId)||''))));
 }
-async function waitBatchSaved(batch,maxAttempts=10){
+async function checkSavedIds(ids){
+  const list=(ids||[]).map(String).filter(Boolean);
+  if(!list.length)return [];
+  const found=[];
+  for(let i=0;i<list.length;i+=40){
+    const part=list.slice(i,i+40);
+    const chk=await jsonp('hasSalesBatch',{ids:part.join(',')});
+    (chk&&chk.found||[]).forEach(id=>found.push(String(id)));
+  }
+  return found;
+}
+async function clearAlreadySyncedPending(){
+  const q=pending();
+  const ids=q.map(p=>String(p.clientSaleId||'')).filter(Boolean);
+  if(!ids.length)return 0;
+  const found=await checkSavedIds(ids);
+  removeConfirmedPending(found);
+  return found.length;
+}
+async function waitBatchSaved(batch,maxAttempts=8){
   const ids=batch.map(x=>String(x.clientSaleId||'')).filter(Boolean);
   if(!ids.length)return [];
   const found=new Set();
   for(let attempt=0;attempt<maxAttempts;attempt++){
-    await new Promise(r=>setTimeout(r,attempt===0?500:700));
+    await new Promise(r=>setTimeout(r,attempt===0?700:900));
     if(!navigator.onLine)break;
     try{
-      const chk=await jsonp('hasSalesBatch',{ids:ids.join(',')});
-      (chk&&chk.found||[]).forEach(id=>found.add(String(id)));
+      const got=await checkSavedIds(ids.filter(id=>!found.has(id)));
+      got.forEach(id=>found.add(String(id)));
       if(ids.every(id=>found.has(id)))break;
     }catch{}
   }
   return ids.filter(id=>found.has(id));
 }
-
-async function syncPending(){
+async function assertSyncBackend(){
+  const info=await jsonp('syncInfo');
+  if(!info || info.batchSync!==true || String(info.version||'')!=='PWA-5.12.0'){
+    throw new Error('GASがPWA-5.12.0になっていません。先にCode.gsを更新して再デプロイしてください。');
+  }
+  return info;
+}
+async function syncPending(manual=false){
   updateNet();
   if(!navigator.onLine || !gasUrl())return;
   if(syncInProgress)return;
+  if(syncAutoBlocked && !manual)return;
+  if(manual){
+    syncAutoBlocked=false;
+    sessionStorage.removeItem('pwa_sync_auto_blocked');
+  }
 
   syncInProgress=true;
   const status=$('syncStatus');
+  let hadFailure=false;
   try{
-    if(status)status.textContent=' 同期中…';
+    if(status)status.textContent=' 同期確認中…';
 
-    // 設定系の未同期を先に処理
+    // GASが古いままなら送信を始めない。これで「79件を延々再送」を防ぐ。
+    await assertSyncBackend();
+
+    // まずGASに既に入っている会計を確認して未同期から外す。
+    // 5.11以前で実際には保存済みなのに79件と残ったケースを救済する。
+    const recovered=await clearAlreadySyncedPending();
+    if(status && recovered)status.textContent=` 保存済み${recovered}件を復旧確認`; 
+
+    // 設定系の未同期
     let masterQueue=pendingMaster();
     const masterRemain=[];
     for(let i=0;i<masterQueue.length;i++){
       const m=masterQueue[i];
-      if(!navigator.onLine){
-        masterRemain.push(...masterQueue.slice(i));
-        break;
-      }
-      try{
-        await postApi(m.action,m.payload);
-      }catch{
-        masterRemain.push(m);
-      }
+      if(!navigator.onLine){masterRemain.push(...masterQueue.slice(i));break;}
+      try{await postApi(m.action,m.payload)}catch{masterRemain.push(m);hadFailure=true;}
       if(status)status.textContent=` 設定同期 ${i+1}/${masterQueue.length}`;
     }
     savePendingMaster(masterRemain);
 
-    // 開始時点の売上キューをスナップショット化。
-    // 成功したclientSaleIdだけ現在のlocalStorageキューから取り除くため、
-    // 同期中に新規会計が増えても消失しない。
+    // 開始時点の未同期だけを1回処理。自動で同じ79件を2周目には送らない。
     const snapshot=pending().map(p=>({...p,saleDate:normalizeLocalDate(p.saleDate),outletName:String(p.outletName||'').trim()}));
     const total=snapshot.length;
     const BATCH_SIZE=10;
-    let confirmedCount=0;
+    let processed=0,confirmedTotal=0;
 
     for(let start=0;start<snapshot.length;start+=BATCH_SIZE){
-      if(!navigator.onLine)break;
-
+      if(!navigator.onLine){hadFailure=true;break;}
       const batch=snapshot.slice(start,start+BATCH_SIZE);
-      if(status)status.textContent=` 売上送信 ${Math.min(start+BATCH_SIZE,total)}/${total}`;
+      processed+=batch.length;
+      if(status)status.textContent=` 売上同期 ${processed}/${total}`;
 
       try{
-        // POSTはno-corsなので「送信完了」と「GAS保存完了」は同じではない。
-        // 送信後、GAS側にclientSaleIdが現れるまで確認してから次へ進む。
         await postApi('recordSalesBatch',{sales:batch});
-        const confirmed=await waitBatchSaved(batch,10);
+        const confirmed=await waitBatchSaved(batch,8);
         removeConfirmedPending(confirmed);
-        confirmedCount+=confirmed.length;
+        confirmedTotal+=confirmed.length;
+        if(confirmed.length<batch.length)hadFailure=true;
       }catch{
-        // このバッチは未同期のまま残す。次の同期で再試行可能。
+        hadFailure=true;
       }
-
-      if(status)status.textContent=` 同期済 ${confirmedCount}/${total}　残り${pending().length}件`;
       await new Promise(r=>setTimeout(r,150));
     }
+
+    // 最後にもう一度だけ全未同期をサーバー照合。
+    // 遅れて保存完了した分があればここで0件まで落とす。
+    try{await clearAlreadySyncedPending()}catch{hadFailure=true;}
 
     if(!masterRemain.length){
       try{
@@ -1152,14 +1211,24 @@ async function syncPending(){
         if(!$('register').classList.contains('hidden'))renderProducts();
       }catch{}
     }
-
     if(currentEvent)await refreshHistoryOnline();
 
-    if(status){
-      const left=pending().length+pendingMaster().length;
-      status.textContent=left?` 残り${left}件`:' 同期完了';
-      setTimeout(()=>{if($('syncStatus'))$('syncStatus').textContent=''},4000);
+    const left=pending().length+pendingMaster().length;
+    if(left===0){
+      syncAutoBlocked=false;
+      sessionStorage.removeItem('pwa_sync_auto_blocked');
+      if(status)status.textContent=' 同期完了';
+    }else{
+      // 1周して残ったら自動再送しない。同期ボタンを押した時だけ再試行。
+      syncAutoBlocked=true;
+      sessionStorage.setItem('pwa_sync_auto_blocked','1');
+      if(status)status.textContent=` 同期停止・残り${left}件（同期ボタンで再試行）`;
     }
+  }catch(err){
+    syncAutoBlocked=true;
+    sessionStorage.setItem('pwa_sync_auto_blocked','1');
+    if(status)status.textContent=' 同期停止';
+    alert(err.message||String(err));
   }finally{
     syncInProgress=false;
     updatePendingTotal();
