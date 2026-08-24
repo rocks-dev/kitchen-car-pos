@@ -47,7 +47,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5.10.0</span>
+  <span class="ver">PWA-5.11.0</span>
 </header>
 <main>
   <div class="card status">
@@ -285,6 +285,40 @@ let editingSaleKey=null,editingSaleOriginal=null,editingPendingSale=false;
 let syncInProgress=false;
 
 function today(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
+function normalizeLocalDate(v){
+  if(v instanceof Date && !isNaN(v)){
+    return `${v.getFullYear()}-${String(v.getMonth()+1).padStart(2,'0')}-${String(v.getDate()).padStart(2,'0')}`;
+  }
+  const s=String(v||'').trim();
+  if(!s)return '';
+  let m=s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if(m)return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
+  m=s.match(/^(\d{4})[\/\.](\d{1,2})[\/\.](\d{1,2})$/);
+  if(m)return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
+  const d=new Date(s);
+  if(!isNaN(d)){
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  }
+  return s;
+}
+function normalizeLocalSale(s){
+  return {...s,saleDate:normalizeLocalDate(s&&s.saleDate),outletName:String((s&&s.outletName)||'').trim()};
+}
+function repairLocalSaleData(){
+  // 旧GASから戻った "Sat Aug 22 2026..." のような日付を yyyy-MM-dd に統一。
+  for(let i=0;i<localStorage.length;i++){
+    const k=localStorage.key(i);
+    if(!k || !k.startsWith('pwa_history_'))continue;
+    try{
+      const a=JSON.parse(localStorage.getItem(k)||'[]');
+      localStorage.setItem(k,JSON.stringify((a||[]).map(normalizeLocalSale)));
+    }catch{}
+  }
+  try{
+    const q=JSON.parse(localStorage.getItem('pwa_pending')||'[]');
+    localStorage.setItem('pwa_pending',JSON.stringify((q||[]).map(p=>({...p,saleDate:normalizeLocalDate(p.saleDate),outletName:String(p.outletName||'').trim()}))));
+  }catch{}
+}
 function gasUrl(){return localStorage.getItem('pwa_gas_url')||''}
 function cacheMaster(){localStorage.setItem('pwa_master',JSON.stringify(data))}
 function loadMaster(){try{return JSON.parse(localStorage.getItem('pwa_master')||'null')}catch{return null}}
@@ -312,7 +346,7 @@ function updatePendingTotal(){
   $('pending').textContent=count;
 }
 
-function historyKey(e){return 'pwa_history_'+e.saleDate+'_'+e.outletName}
+function historyKey(e){return 'pwa_history_'+normalizeLocalDate(e.saleDate)+'_'+String(e.outletName||'').trim()}
 function localHistory(e){try{return JSON.parse(localStorage.getItem(historyKey(e))||'[]')}catch{return []}}
 function saveHistory(e,h){localStorage.setItem(historyKey(e),JSON.stringify(h))}
 
@@ -347,6 +381,7 @@ async function postApi(action,payload){
 async function init(){
   $('saleDate').value=today();
   ['discount','paypay','received'].forEach(id=>$(id).addEventListener('input',renderCart));
+  repairLocalSaleData();
   updateNet(); savePending(pending()); savePendingMaster(pendingMaster());
 
   const cached=loadMaster();
@@ -405,14 +440,14 @@ function localAllSales(){
         const sk=String(s.clientSaleId||s.saleId||'') || (String(s.timestamp||'')+'|'+String(s.outletName||''));
         if(seen[sk])return;
         seen[sk]=1;
-        out.push(s);
+        out.push(normalizeLocalSale(s));
       });
     }catch{}
   }
   return out;
 }
 function localGroupSummaries(){
-  const m={};localAllSales().forEach(s=>{const k=s.saleDate+'|'+s.outletName;if(!m[k])m[k]={saleDate:s.saleDate,outletName:s.outletName,grossSales:0,cashSales:0,paypaySales:0,discountTotal:0,ticketFace:0,ticketDiff:0};
+  const m={};localAllSales().forEach(raw=>{const s=normalizeLocalSale(raw),date=normalizeLocalDate(s.saleDate),name=String(s.outletName||'').trim(),k=date+'|'+name;if(!m[k])m[k]={saleDate:date,outletName:name,grossSales:0,cashSales:0,paypaySales:0,discountTotal:0,ticketFace:0,ticketDiff:0};
     const g=m[k];g.grossSales+=Number(s.total||0);g.cashSales+=Number(s.cashAmount||0);g.paypaySales+=Number(s.paypayAmount||0);g.discountTotal+=Number(s.discountAmount||0);
     (s.items||[]).forEach(i=>{const qty=Number(i.qty||0),tq=i.ticketQty!==undefined?Number(i.ticketQty||0):(String(i.paymentType||'')==='ticket'?qty:0),p=Number(i.price||0),tv=Number(i.ticketValue||0);if(tq){g.ticketFace+=Math.min(p,tv)*tq;g.ticketDiff+=Math.max(p-tv,0)*tq}})
   });return Object.values(m);
@@ -1021,6 +1056,32 @@ async function checkout(){
   }
 }
 
+function pendingSaleKey(p){
+  return String((p&&p.clientSaleId)||'') || [normalizeLocalDate(p&&p.saleDate),String((p&&p.outletName)||''),JSON.stringify((p&&p.items)||[])].join('|');
+}
+function removeConfirmedPending(ids){
+  const done=new Set((ids||[]).map(String));
+  if(!done.size)return;
+  // 現在のキューから成功分だけを除く。
+  // 同期中に新しい会計が追加されても、それを上書きして消さない。
+  savePending(pending().filter(p=>!done.has(String((p&&p.clientSaleId)||''))));
+}
+async function waitBatchSaved(batch,maxAttempts=10){
+  const ids=batch.map(x=>String(x.clientSaleId||'')).filter(Boolean);
+  if(!ids.length)return [];
+  const found=new Set();
+  for(let attempt=0;attempt<maxAttempts;attempt++){
+    await new Promise(r=>setTimeout(r,attempt===0?500:700));
+    if(!navigator.onLine)break;
+    try{
+      const chk=await jsonp('hasSalesBatch',{ids:ids.join(',')});
+      (chk&&chk.found||[]).forEach(id=>found.add(String(id)));
+      if(ids.every(id=>found.has(id)))break;
+    }catch{}
+  }
+  return ids.filter(id=>found.has(id));
+}
+
 async function syncPending(){
   updateNet();
   if(!navigator.onLine || !gasUrl())return;
@@ -1031,8 +1092,7 @@ async function syncPending(){
   try{
     if(status)status.textContent=' 同期中…';
 
-    // 商品・チケット・アイテム群などの変更を先に同期。
-    // 1件成功するたびに端末側キューから確実に外す。
+    // 設定系の未同期を先に処理
     let masterQueue=pendingMaster();
     const masterRemain=[];
     for(let i=0;i<masterQueue.length;i++){
@@ -1050,54 +1110,35 @@ async function syncPending(){
     }
     savePendingMaster(masterRemain);
 
-    // 売上は10会計ずつGASへまとめて送る。
-    // 旧バージョンで残った pwa_pending もそのまま対象になる。
-    const all=pending();
-    const total=all.length;
-    const unresolved=[];
+    // 開始時点の売上キューをスナップショット化。
+    // 成功したclientSaleIdだけ現在のlocalStorageキューから取り除くため、
+    // 同期中に新規会計が増えても消失しない。
+    const snapshot=pending().map(p=>({...p,saleDate:normalizeLocalDate(p.saleDate),outletName:String(p.outletName||'').trim()}));
+    const total=snapshot.length;
     const BATCH_SIZE=10;
+    let confirmedCount=0;
 
-    for(let start=0; start<all.length; start+=BATCH_SIZE){
-      const batch=all.slice(start,start+BATCH_SIZE);
+    for(let start=0;start<snapshot.length;start+=BATCH_SIZE){
+      if(!navigator.onLine)break;
 
-      if(!navigator.onLine){
-        unresolved.push(...all.slice(start));
-        break;
-      }
+      const batch=snapshot.slice(start,start+BATCH_SIZE);
+      if(status)status.textContent=` 売上送信 ${Math.min(start+BATCH_SIZE,total)}/${total}`;
 
       try{
+        // POSTはno-corsなので「送信完了」と「GAS保存完了」は同じではない。
+        // 送信後、GAS側にclientSaleIdが現れるまで確認してから次へ進む。
         await postApi('recordSalesBatch',{sales:batch});
-
-        // GAS側で実際に保存されたclientSaleIdを一括確認。
-        const ids=batch.map(x=>String(x.clientSaleId||'')).filter(Boolean);
-        const chk=ids.length
-          ? await jsonp('hasSalesBatch',{ids:ids.join(',')})
-          : {found:[]};
-
-        const found=new Set((chk&&chk.found)||[]);
-        batch.forEach(p=>{
-          const id=String(p.clientSaleId||'');
-          if(!id || !found.has(id))unresolved.push(p);
-        });
+        const confirmed=await waitBatchSaved(batch,10);
+        removeConfirmedPending(confirmed);
+        confirmedCount+=confirmed.length;
       }catch{
-        // このバッチだけ残して次のバッチへ進む。
-        // 1件の失敗で後続全部が同期停止しない。
-        unresolved.push(...batch);
+        // このバッチは未同期のまま残す。次の同期で再試行可能。
       }
 
-      // 途中で画面更新されても、ここまで成功した分は復活しないよう
-      // 「失敗済み + まだ未処理」を毎バッチ保存する。
-      const unprocessed=all.slice(start+batch.length);
-      savePending([...unresolved,...unprocessed]);
-
-      const done=Math.min(start+batch.length,total);
-      if(status)status.textContent=` 売上同期 ${done}/${total}`;
-      await new Promise(r=>setTimeout(r,120));
+      if(status)status.textContent=` 同期済 ${confirmedCount}/${total}　残り${pending().length}件`;
+      await new Promise(r=>setTimeout(r,150));
     }
 
-    savePending(unresolved);
-
-    // 同期後にサーバーの最新マスタを端末へ再取得
     if(!masterRemain.length){
       try{
         const b=await jsonp('bootstrap');
@@ -1117,7 +1158,7 @@ async function syncPending(){
     if(status){
       const left=pending().length+pendingMaster().length;
       status.textContent=left?` 残り${left}件`:' 同期完了';
-      setTimeout(()=>{if($('syncStatus'))$('syncStatus').textContent=''},3000);
+      setTimeout(()=>{if($('syncStatus'))$('syncStatus').textContent=''},4000);
     }
   }finally{
     syncInProgress=false;
@@ -1162,9 +1203,9 @@ function executeReprint(){
 
 async function refreshHistoryOnline(){
   try{
-    const server=await jsonp('history',{outletName:currentEvent.outletName,saleDate:currentEvent.saleDate});
-    const local=localHistory(currentEvent),map={};
-    [...local,...server].forEach(s=>{const k=s.clientSaleId||s.saleId;map[k]=s});
+    const server=(await jsonp('history',{outletName:currentEvent.outletName,saleDate:currentEvent.saleDate})||[]).map(normalizeLocalSale);
+    const local=localHistory(currentEvent).map(normalizeLocalSale),map={};
+    [...local,...server].forEach(s=>{const k=s.clientSaleId||s.saleId;map[k]=normalizeLocalSale(s)});
     const merged=Object.values(map).sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp));
     saveHistory(currentEvent,merged);renderHistory();
   }catch{}
