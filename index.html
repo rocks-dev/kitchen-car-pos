@@ -47,7 +47,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
 <body>
 <header>
   <h1>キッチンカーPOS</h1>
-  <span class="ver">PWA-5.13.0</span>
+  <span class="ver">PWA-5.14.0</span>
 </header>
 <main>
   <div class="card status">
@@ -102,7 +102,7 @@ label{display:block;font-weight:700;margin:6px 0 5px}input{width:100%;padding:11
     <div id="summaryDetail" class="hidden">
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
-          <b id="summaryTitle"></b><div class="actions"><button class="btn" onclick="printSummary()">集計表を印刷</button><button class="danger" onclick="deleteSummaryData()">この集計を削除</button></div>
+          <b id="summaryTitle"></b><div class="actions"><button class="btn" onclick="printSummary()">集計表を印刷</button><button class="primary" onclick="repairSelectedSummaryFromLocal()">この端末履歴で修復</button><button class="danger" onclick="deleteSummaryData()">この集計を削除</button></div>
         </div>
         <div id="summaryKpi" class="summaryKpi"></div>
       </div>
@@ -483,7 +483,7 @@ function localGroupSummaries(){
   });return Object.values(m);
 }
 function renderSummaryGroups(groups){
-  $('summaryGroups').innerHTML=groups.length?`<table class="summaryTable"><tr><th>日付</th><th>出店</th><th class="money">総売上</th><th class="money">現金</th><th class="money">PayPay</th><th class="money">チケット額</th><th class="money">差額</th><th>操作</th></tr>${groups.map(g=>`<tr style="cursor:pointer" onclick='selectSummary(${JSON.stringify(g.saleDate)},${JSON.stringify(g.outletName)})'><td>${esc(g.saleDate)}</td><td>${esc(g.outletName)}</td><td class="money">${yen(g.grossSales)}</td><td class="money">${yen(g.cashSales)}</td><td class="money">${yen(g.paypaySales||0)}</td><td class="money">${yen(g.ticketFace)}</td><td class="money">${yen(g.ticketDiff)}</td><td><button class="danger" onclick='event.stopPropagation();deleteSummaryGroup(${JSON.stringify(g.saleDate)},${JSON.stringify(g.outletName)})'>削除</button></td></tr>`).join('')}</table>`:'<div class="notice">データなし</div>';
+  $('summaryGroups').innerHTML=groups.length?`<table class="summaryTable"><tr><th>日付</th><th>出店</th><th class="money">総売上</th><th class="money">現金</th><th class="money">PayPay</th><th class="money">チケット額</th><th class="money">差額</th><th>操作</th></tr>${groups.map(g=>`<tr style="cursor:pointer" onclick='selectSummary(${JSON.stringify(g.saleDate)},${JSON.stringify(g.outletName)})'><td>${esc(g.saleDate)}</td><td>${esc(g.outletName)}</td><td class="money">${yen(g.grossSales)}</td><td class="money">${yen(g.cashSales)}</td><td class="money">${yen(g.paypaySales||0)}</td><td class="money">${yen(g.ticketFace)}</td><td class="money">${yen(g.ticketDiff)}</td><td style="white-space:nowrap"><button class="btn" onclick='event.stopPropagation();repairSummaryFromLocal(${JSON.stringify(g.saleDate)},${JSON.stringify(g.outletName)})'>修復</button> <button class="danger" onclick='event.stopPropagation();deleteSummaryGroup(${JSON.stringify(g.saleDate)},${JSON.stringify(g.outletName)})'>削除</button></td></tr>`).join('')}</table>`:'<div class="notice">データなし</div>';
 }
 async function selectSummary(date,name){
   selectedSummaryEvent={saleDate:date,outletName:name};
@@ -508,6 +508,209 @@ function purgeLocalSalesForEvent(date,name){
   const q=pending().filter(p=>!(String(p.saleDate||'')===String(date)&&String(p.outletName||'')===String(name)));
   savePending(q);
 }
+
+function localSalesForEvent(date,name){
+  const d=normalizeLocalDate(date), n=String(name||'').trim();
+  return localAllSales()
+    .filter(s=>normalizeLocalDate(s.saleDate)===d && String(s.outletName||'').trim()===n)
+    .sort((a,b)=>new Date(a.timestamp||0)-new Date(b.timestamp||0));
+}
+
+function localSaleGross(s){
+  return (s.items||[]).reduce((sum,i)=>{
+    const q=(i.cashQty!==undefined||i.ticketQty!==undefined)
+      ? Number(i.cashQty||0)+Number(i.ticketQty||0)
+      : Number(i.qty||0);
+    return sum + Number(i.price||0)*q;
+  },0);
+}
+
+function localSaleToSyncPayload(s,index,date,name){
+  const items=[];
+  (s.items||[]).forEach(i=>{
+    const rawQty=Number(i.qty||0);
+    const cashQty=(i.cashQty!==undefined)
+      ? Number(i.cashQty||0)
+      : (String(i.paymentType||'')==='ticket'?0:rawQty);
+    const ticketQty=(i.ticketQty!==undefined)
+      ? Number(i.ticketQty||0)
+      : (String(i.paymentType||'')==='ticket'?rawQty:0);
+
+    if(cashQty<=0 && ticketQty<=0)return;
+    items.push({
+      id:String(i.id||''),
+      cashQty:cashQty,
+      ticketQty:ticketQty,
+      name:String(i.name||''),
+      price:Number(i.price||0),
+      taxRate:Number(i.taxRate||8),
+      ticketId:String(i.ticketId||''),
+      ticketName:String(i.ticketName||''),
+      ticketValue:Number(i.ticketValue||0)
+    });
+  });
+
+  let clientId=String(s.clientSaleId||s.saleId||'').trim();
+  if(!clientId){
+    const ts=String(s.timestamp||index).replace(/[^0-9A-Za-z]/g,'').slice(0,28);
+    clientId=`repair_${normalizeLocalDate(date).replace(/-/g,'')}_${index}_${ts}`;
+  }
+
+  return {
+    items:items,
+    outletName:String(name||'').trim(),
+    saleDate:normalizeLocalDate(date),
+    discountAmount:Number(s.discountAmount||0),
+    paypayAmount:Number(s.paypayAmount||0),
+    clientSaleId:clientId
+  };
+}
+
+async function getEventActiveStatus(date,name){
+  return await jsonp('eventActiveStatus',{
+    saleDate:normalizeLocalDate(date),
+    outletName:String(name||'').trim()
+  });
+}
+
+async function waitUntilEventVoided(date,name,maxAttempts=12){
+  for(let i=0;i<maxAttempts;i++){
+    await new Promise(r=>setTimeout(r,i===0?700:900));
+    try{
+      const st=await getEventActiveStatus(date,name);
+      if(Number(st&&st.transactions||0)===0)return true;
+    }catch{}
+  }
+  return false;
+}
+
+async function waitUntilSummaryMatches(date,name,expectedGross,expectedTransactions,maxAttempts=12){
+  for(let i=0;i<maxAttempts;i++){
+    await new Promise(r=>setTimeout(r,i===0?700:900));
+    try{
+      const s=await jsonp('summary',{saleDate:normalizeLocalDate(date),outletName:String(name||'').trim()});
+      if(Number(s&&s.grossSales||0)===Number(expectedGross||0) &&
+         Number(s&&s.transactions||0)===Number(expectedTransactions||0)){
+        return s;
+      }
+    }catch{}
+  }
+  return null;
+}
+
+async function repairSelectedSummaryFromLocal(){
+  if(!selectedSummaryEvent)return;
+  return repairSummaryFromLocal(selectedSummaryEvent.saleDate,selectedSummaryEvent.outletName);
+}
+
+async function repairSummaryFromLocal(date,name){
+  if(!navigator.onLine)return alert('修復はオンライン時に行ってください。');
+  if(syncInProgress)return alert('同期処理中です。同期が終わってから修復してください。');
+
+  const d=normalizeLocalDate(date), n=String(name||'').trim();
+  const sales=localSalesForEvent(d,n);
+  if(!sales.length){
+    return alert('この端末に、この出店の会計履歴がありません。\n\n修復は「正しい履歴が残っている端末」で実行してください。');
+  }
+
+  const expectedGross=sales.reduce((sum,s)=>sum+localSaleGross(s),0);
+  const expectedTransactions=sales.length;
+
+  const ok=confirm(
+    `【オンライン集計の修復】\n\n`+
+    `${d} ${n}\n\n`+
+    `この端末に残っている正しい履歴：${expectedTransactions}件\n`+
+    `この端末の総売上：${yen(expectedGross)}\n\n`+
+    `オンライン側のこの出店データをいったん無効化し、\n`+
+    `この端末の履歴だけで作り直します。\n\n`+
+    `表示されている ${yen(expectedGross)} が正しい場合だけ「OK」を押してください。`
+  );
+  if(!ok)return;
+
+  syncInProgress=true;
+  const status=$('syncStatus');
+
+  try{
+    if(status)status.textContent=' 集計修復：GAS確認中…';
+    await assertSyncBackend();
+
+    // 1) オンライン側の対象出店だけを一括で無効化
+    if(status)status.textContent=' 集計修復：旧オンライン売上を整理中…';
+    await postApi('voidEventSales',{saleDate:d,outletName:n});
+
+    const voided=await waitUntilEventVoided(d,n,12);
+    if(!voided){
+      throw new Error('オンライン側の旧売上を安全に整理できませんでした。端末データは消していません。もう一度「修復」を押してください。');
+    }
+
+    // 2) この端末の全履歴を会計時点スナップショットで再登録
+    const payloads=sales.map((s,i)=>localSaleToSyncPayload(s,i,d,n));
+    const BATCH_SIZE=10;
+    let restored=0;
+
+    for(let start=0;start<payloads.length;start+=BATCH_SIZE){
+      if(!navigator.onLine)throw new Error('修復途中でオフラインになりました。端末履歴は残っています。オンラインに戻してもう一度「修復」を押してください。');
+
+      const batch=payloads.slice(start,start+BATCH_SIZE);
+      if(status)status.textContent=` 集計修復：${Math.min(start+BATCH_SIZE,payloads.length)}/${payloads.length}`;
+
+      await postApi('recordSalesBatch',{sales:batch});
+      const confirmed=await waitBatchSaved(batch,10);
+
+      if(confirmed.length!==batch.length){
+        throw new Error(
+          `修復途中で${batch.length-confirmed.length}件を確認できませんでした。\n`+
+          `端末履歴はそのまま残っています。もう一度「修復」を押せば最初から安全に作り直せます。`
+        );
+      }
+
+      restored+=confirmed.length;
+      removeConfirmedPending(confirmed);
+      await new Promise(r=>setTimeout(r,150));
+    }
+
+    // 3) オンライン集計が端末の金額・件数と完全一致するまで確認
+    if(status)status.textContent=' 集計修復：金額確認中…';
+    const fixed=await waitUntilSummaryMatches(d,n,expectedGross,expectedTransactions,12);
+
+    if(!fixed){
+      const st=await getEventActiveStatus(d,n).catch(()=>null);
+      throw new Error(
+        `再登録は${restored}件完了しましたが、最終金額の一致を確認できませんでした。\n`+
+        `端末の正しい総売上：${yen(expectedGross)}\n`+
+        `オンライン確認値：${st?yen(st.grossSales||0):'確認できません'}\n\n`+
+        `端末履歴は消していません。`
+      );
+    }
+
+    // 4) 画面をオンラインの正しい集計に更新
+    selectedSummaryEvent={saleDate:d,outletName:n};
+    selectedSummary=fixed;
+    renderSummaryDetail();
+
+    const groups=await jsonp('groups');
+    renderSummaryGroups(groups||[]);
+
+    if(status)status.textContent=' 集計修復完了';
+    updatePendingTotal();
+
+    alert(
+      `修復完了しました。\n\n`+
+      `${d} ${n}\n`+
+      `取引件数：${expectedTransactions}件\n`+
+      `総売上：${yen(expectedGross)}\n\n`+
+      `オンライン集計とこの端末の履歴が一致しました。`
+    );
+  }catch(err){
+    if(status)status.textContent=' 集計修復停止';
+    alert(err.message||String(err));
+  }finally{
+    syncInProgress=false;
+    setTimeout(()=>{if($('syncStatus')&&$('syncStatus').textContent===' 集計修復完了')$('syncStatus').textContent=''},4000);
+    updatePendingTotal();
+  }
+}
+
 async function deleteSummaryGroup(date,name){
   if(!navigator.onLine)return alert('集計データの削除はオンライン時に行ってください。');
   if(!confirm(`「${date} ${name}」を集計一覧から削除しますか？\n\nこの出店の会計履歴・総売上・商品別・チケット別集計が削除されます。\n出店レジ枠そのものは残ります。`))return;
@@ -1207,8 +1410,8 @@ async function waitBatchSaved(batch,maxAttempts=8){
 }
 async function assertSyncBackend(){
   const info=await jsonp('syncInfo');
-  if(!info || info.batchSync!==true || info.snapshotSync!==true || String(info.version||'')!=='PWA-5.13.0'){
-    throw new Error('GASがPWA-5.13.0になっていません。先にCode.gsを更新して再デプロイしてください。');
+  if(!info || info.batchSync!==true || info.snapshotSync!==true || info.localRepair!==true || String(info.version||'')!=='PWA-5.14.0'){
+    throw new Error('GASがPWA-5.14.0になっていません。先にCode.gsを更新して再デプロイしてください。');
   }
   return info;
 }
